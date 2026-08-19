@@ -1,0 +1,615 @@
+stores {
+    store_id {
+        city
+        image
+        name_ar
+        name_fr
+        status              // "open" | "trafic"| "close"
+        phone
+        contact
+        active               // this mean the store is active and have access to be can change status
+        earnings
+        cash_payment
+        last_active
+        lat
+        lng
+        geohash
+        trend_level
+        trend_time = "2026-08-17-22"
+        trend_score                // sort weight for trending order
+        orders_bucket // this is hour orders user to change trend evey start new hour
+        tags []
+        rate
+        rate_numbers
+        estimated_delivery_time
+        min_order_price
+        created_by
+        created_at
+        work_time (subcollection) {
+            time_id {
+                index
+                start_day  // "monday"
+                start_time // "09:00"
+                end_day // "tuesday"
+                end_time // "02:00"
+            }
+        }
+        categories (subcollection) {
+            category_id {
+                index
+                name_ar
+                name_fr
+                show_type // "row" | "column"
+            }
+        }
+        items (subcollection) {
+            item_id {
+                sell_count
+                exist
+                image
+                name_ar
+                name_fr
+                description_fr
+                description_ar
+                price
+                category
+            }
+        }
+        groups (subcollection) {
+            group_id {
+                item_id
+                index
+                min
+                max
+                name_ar
+                name_fr
+                options []    // {option_id,name_ar, name_fr, price}
+            }
+        }
+        owners (subcollection) {
+            user_id {
+                user_id
+                role  "owner" | "staff"
+                name
+                phone
+                added_by
+                added_at
+                status          // "active" | "removed"
+            }
+        }
+        ratings (subcollection) {
+            rating_id {
+                user_id
+                name
+                rating           // 1-5
+                comment
+                created_at
+            }
+        }
+    }
+}
+
+delivery {
+    user_id {
+        city
+        lat
+        lng
+        geohash
+        active
+        is_online
+        rate
+        rate_numbers
+        status
+        vehicle_type
+        last_active
+        identification {
+            card_id
+            card_font_image
+            card_back_image
+        }
+        completed_orders
+        cancelled_orders
+        payout_balance
+        created_at
+        created_by
+    }
+}
+
+users {
+    user_id {
+        name
+        phone
+        language
+        wallet_balance
+        fcm
+        active
+        role               // "owner", "delivery"
+        cash_payment
+        address {
+            location_name
+            lat            // set by select_map.dart when the user picks a location
+            lng            // set by select_map.dart when the user picks a location      
+            city           
+        }
+        locations (subcollection) {
+            location_id {
+                name
+                lat
+                lng
+                city
+            }
+        }
+        stores (subcollection) {
+            store_id {
+                name_ar
+                name_fr
+                image
+                joined_at
+            }
+        }
+    }
+
+    carts (subcollection) {
+        store_id {
+            store_id
+            transaction_id
+            waiting_payment
+            "lines" {
+                "{line_key}" {
+                    line_option
+                    item_id
+                    name_ar
+                    name_fr
+                    image
+                    quantity
+                    price
+                    groups [
+                        {
+                            group_id
+                            name_ar
+                            name_fr
+                            selected [
+                                option_id
+                                name_ar
+                                name_fr
+                                price
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}
+
+orders {
+    order_id {
+        user_id
+        store_id
+        delivery_id
+        store_name_ar
+        store_name_fr
+        store_image
+        order_status            // "placed" | "accepted" | "preparing" | "ready" | "completed" | "cancelled"
+        delivery_status          // "pending" | "assigned" | "arrived_to_store"| "picked_up" | "on_the_way" | "arrived" | "delivered"
+        created_at
+        accepted_at
+        ready_at
+        picked_up_at
+        delivered_at
+        cancelled_at
+        completed_at
+        subtotal
+        delivery_fee
+        service_fee
+        discount
+        total
+        store_address { lat, lng}
+        user_address { lat, lng }
+        notes
+        order_number
+        payment_type
+        estimated_delivery_time
+        last_update
+        "lines" {
+                "{line_key}" {
+                    line_option
+                    item_id
+                    name_ar
+                    name_fr
+                    image
+                    quantity
+                    price
+                    total
+                    groups [
+                        {
+                            group_id
+                            name_ar
+                            name_fr
+                            selected [
+                                option_id
+                                name_ar
+                                name_fr
+                                price
+                            ]
+                        }
+                    ]
+                }
+            }
+    }
+}
+
+users_transactions {
+    transaction_id {
+        user_id
+        store_id
+        transaction_number
+        type                  // "order_payment" | "refund" |"deduction" | "withdraw"
+        payment_type = // "wallet_balance" | "{payment_name}"
+        payment_code
+        credit_before // null if (type = "order_payment" and order_payment_type != "wallet_balance")
+        credit_after // null if (type = "order_payment" and order_payment_type != "wallet_balance")
+        summary_section {
+            subtotal
+            delivery_fee
+            service_fee
+            discount
+        }
+        amount
+        order_id
+        status                  // "pending" | "completed" | "failed" | "expired"
+        created_at
+    }
+    //
+}
+
+client_transactions {
+    transaction_id {
+        transaction_number
+        transactioner_type // "store" | "delivery"
+        transactioner_id
+        type                  // "order_payment" "withdraw" | "deduction" | "refund"
+        credit_before
+        credit_after
+        amount
+        status                  // "pending" | "completed" | "failed"
+        created_at
+    }
+}
+
+reports {
+    report_id {
+        created_at
+        updated_at
+        report_type // "user_store", "user_delivery", "delivery_store", "delivery_user", "store_delivery", "system_user", "system_delivery"
+        reported
+        reporter
+        status // "pending" | "processing" | "completed"
+        action // "blocking" | "none" | "deduction"
+        transaction_id // not null if action = "deduction"
+        priority
+        admin_by
+        message
+        images []
+    }
+}
+
+payment_types {
+    payment_id {
+        name
+        image
+        cities []
+        active
+    }
+}
+
+areas {
+    area_id {
+        active
+        boundary []
+        name
+    }
+}
+
+cities {
+    city_id {
+        city
+        service_fee
+        delivery_fee
+        km_fee
+        rain
+        rain_fee
+        cash_payment
+        active            // false = not servicable, even if a matching area polygon exists and contains the point
+        advertisement_price {
+        "home":   { view_price: 10, click_price: 50 },
+        "search": { view_price: 5,  click_price: 30 },
+        "carts_list":   { view_price: 10, click_price: 50 },
+        "store_daitails":   { view_price: 10, click_price: 50 },
+        "orders_list":   { view_price: 10, click_price: 50 },
+        "live_order":   { view_price: 10, click_price: 50 },
+        "histories_list":   { view_price: 10, click_price: 50 }
+        }
+        
+    }
+}
+
+stores_analytics {
+    store_id {
+        total_orders
+        total_revenue
+        completed_orders
+        total_canceled
+        last_update
+        yearly (subcollection) {
+            year {
+                year
+                total_orders
+                completed_orders
+                total_canceled
+                total_revenue
+            }
+        }
+        monthly (subcollection) {
+                month {
+                    month
+                    total_orders
+                    completed_orders
+                    total_canceled
+                    total_revenue
+                }
+            }
+        daily (subcollection) {
+            day {
+                day
+                total_orders
+                completed_orders
+                total_canceled
+                total_revenue
+                hours {
+                    "{hour}"= trend_score
+                }
+            }
+        }
+    }
+}
+
+platform_analytics {
+    global {
+        total_orders
+        total_canceled
+        completed_orders
+        total_revenue
+        yearly (subcollection) {
+            year {
+                year
+                total_orders
+                total_revenue
+                completed_orders
+                total_canceled
+                active_users
+                active_delivery
+                active_stores
+            }
+        }
+        monthly (subcollection) {
+            month {
+                month
+                total_orders
+                completed_orders
+                total_canceled
+                total_revenue
+                active_users
+                active_delivery
+                active_stores
+            }
+        }
+        daily (subcollection) {
+            day {
+                day
+                total_orders
+                completed_orders
+                total_canceled
+                total_revenue
+                active_users
+                active_delivery
+                active_stores
+            }
+        }
+    }
+}
+
+conversations {
+    conversation_id {
+        participant_types: { uidA: "user", uidB: "store" }
+        participants: [uidA, uidB]
+        last_read: { uidA: <ts>, uidB: <ts> }
+        order_id // not null if is order conversation
+        status            // "open" | "resolved" | "closed"
+        category          // "order_issue" | "payment" | "delivery" | "call_admin"
+        created_at
+        messages (subcollection) {
+            message_id {
+                sender_id
+                sender_type   // "user" | "store" | "delivery" | "admin"
+                message_type  // "text" | "image"
+                message
+                created_at
+            }
+        }
+    }
+}
+
+promotions {
+    {promotion_code} {
+        code              // "SUMMER2024"
+        type              // "percentage" | "free_delivery"
+        value             // 20 (for 20% )
+        active
+        start_date
+        end_date
+        usage_limit
+        usage_count
+        user_limit
+        min_order_value
+        max_discount
+        applicable_to {
+            cities: []
+            stores: []
+            all: boolean
+        }
+        created_by
+        description_ar
+        description_fr
+        image
+    }
+}
+
+banner {
+    city_name {
+        image
+        active
+    }
+}
+
+user_promotions {
+    {user_id}_{promotion_code} {
+        user_id
+        promotion_id
+        used_count
+    }
+}
+
+ad_users {
+    ad_user_id {              // their auth uid (web login)
+        name
+        phone
+        email
+        active
+        created_by
+        created_at
+    }
+}
+
+advertisers {
+    advertiser_id {
+
+        // ── wallet ──
+        balance              // funds available to spend on ads
+        total_spent          // lifetime spend (across all campaigns)
+        active               // account enabled
+        verify
+        // ── KYC (sensitive — lock to owner + admin) ──
+        identification {
+            images []
+        }
+        created_at
+        owners (subcollection) {
+            user_id {
+                user_id
+                role  "owner" | "staff"
+                name
+                phone
+                added_by
+                added_at
+                status          // "active" | "removed"
+            }
+        }
+    }
+}
+
+campaigns {
+    campaign_id {
+        advertiser_id
+        name
+
+        // ── pricing ──
+        pricing_model        // "cpc" | "cpv"
+
+        // ── shared budget pool ──
+        budget               // total shared pool for all its ads
+        spent                // total spent across its ads
+        daily_budget_limit
+        spent_today
+        spent_today_date     // lazy daily reset (compare to today's date)
+        monthly_budget_limit
+        spent_month
+        spent_month_date     // lazy monthly reset (compare to this month)
+        daily_frequency_cap
+
+        // ── targeting ──
+        cities []            // city_ids this campaign runs in
+        start_date
+        end_date
+
+        // ── state ──
+        active               // advertiser/admin on-off
+        created_at
+    }
+}
+
+ads {
+    ad_id {
+        campaign_id          // draws budget from this campaign
+        advertiser_id        // denormalized → direct "advertiser's ads" queries
+
+        // ── creative (what the user sees) ──
+        title_fr, title_ar
+        subtitle_fr, subtitle_ar
+        files []             // image(s) — URLs, not bytes
+        action_type          // "store" | "url" | ...
+        action_value         // store_id, link, etc. (what a tap opens)
+        positions []             // slot: "home" | "search" | "store" | "any"
+
+        // ── own performance (for picking the winner) ──
+        views
+        clicks
+
+        // ── state ──
+        active
+        approved             // admin vetted the creative content
+        approved_by
+        created_at
+    }
+}
+
+advertiser_transactions {
+    ad_transaction_id {
+        advertiser_id
+        type              // "deposit" | "ad_spend" | "refund"
+        amount
+        balance_before
+        balance_after
+        ad_id
+        payment_method
+        status
+        created_at
+    }
+}
+
+system {
+    config {
+        android_version
+        ios_version
+    }
+}
+
+admins {
+    admin_id {
+        name
+        phone
+        email
+        role: "super | ops | finance"
+        cities []          // city_ids this admin has access to; empty/absent = all cities
+        permissions: {
+            "manage_users": true
+            "manage_stores": true
+            "manage_orders": true
+            "manage_delivery": false
+            "manage_ads": false
+            "manage_finance": false
+        }
+        active: true
+        created_at
+    }
+}
