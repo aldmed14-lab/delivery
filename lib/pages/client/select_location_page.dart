@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
@@ -69,12 +70,27 @@ class _SelectMapPageState extends State<SelectMapPage> {
   String? _resolvedCity;
   String _checkMessage = '';
 
+  // Loaded once from assets/map_style.json and cached - starts null and the
+  // map renders with the default Google style until it's ready.
+  String? _mapStyle;
+
   bool get _isArabic => widget.language == 'ar';
 
   @override
   void initState() {
     super.initState();
     _initialize();
+    _loadMapStyle();
+  }
+
+  Future<void> _loadMapStyle() async {
+    try {
+      final style = await rootBundle.loadString('assets/map_style.json');
+      if (mounted) setState(() => _mapStyle = style);
+    } catch (_) {
+      // Falls back to the default Google style - not worth failing the
+      // page over cosmetic map styling.
+    }
   }
 
   Future<void> _initialize() async {
@@ -515,6 +531,7 @@ class _SelectMapPageState extends State<SelectMapPage> {
                         zoom: 15,
                       ),
                       onMapCreated: (controller) => _mapController = controller,
+                      style: _mapStyle,
                       onCameraMove: (position) => _center = position.target,
                       onCameraIdle: _checkCurrentLocation,
                       myLocationEnabled: true,

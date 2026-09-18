@@ -10,6 +10,7 @@ import 'package:flutter_application_1/pages/registre/language.dart';
 import 'package:flutter_application_1/utils/connection.dart';
 import 'package:flutter_application_1/utils/connection_ui.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
+import 'package:flutter_application_1/widgets/delivery_offer_overlay.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
@@ -33,6 +34,11 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Firebase Auth FCM Check',
       home: MainPage(),
+      // Wraps every route (not just one page) so a delivery driver's
+      // "Nouvelle course" offer can appear on top regardless of which
+      // screen they're currently on - see DeliveryOfferOverlay.
+      builder: (context, child) =>
+          DeliveryOfferOverlay(child: child ?? const SizedBox.shrink()),
     );
   }
 }
@@ -83,6 +89,7 @@ class _MainPageState extends State<MainPage> {
     String? languagePref = prefs.getString('language');
 
     if (languagePref != "ar" && languagePref != "fr") {
+      if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => LanguageSelectionPage()),

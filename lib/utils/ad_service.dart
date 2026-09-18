@@ -250,11 +250,19 @@ class AdService {
         }
       }
 
+      // Keyed by adId so an ad that's still eligible across this refresh
+      // carries its not-yet-flushed view/click counts forward - rebuilding
+      // fresh CachedAd instances below would otherwise silently zero out
+      // any views/clicks recorded since the last flush() (e.g. a home-page
+      // view recorded seconds before a refresh happens to land, losing the
+      // count before the 30s flush timer ever gets to persist it).
+      final oldByAdId = {for (final ad in _cache) ad.adId: ad};
+
       _cache = adsDocs.map((doc) {
         final data = doc.data();
         final campaign = campaignById[data['campaign_id']] ?? const {};
         final seen = seenById[doc.id];
-        return CachedAd(
+        final newAd = CachedAd(
           adId: doc.id,
           campaignId: data['campaign_id'] ?? '',
           pricingModel: campaign['pricing_model'] ?? 'cpv',
@@ -267,11 +275,17 @@ class AdService {
           actionType: data['action_type'] ?? 'store',
           actionValue: data['action_value'] ?? '',
           positions: List<String>.from(data['positions'] ?? const []),
-          dailyFrequencyCap: (campaign['daily_frequency_cap'] ?? 0) as int,
+          dailyFrequencyCap: (campaign['dailyfrequency_cap'] ?? 0) as int,
           cityId: _cityDocId!,
           seenDay: seen?['seen_day'] as String?,
           seenDayCount: (seen?['seen_day_count'] ?? 0) as int,
         );
+        final previous = oldByAdId[doc.id];
+        if (previous != null) {
+          newAd.localViews.addAll(previous.localViews);
+          newAd.localClicks.addAll(previous.localClicks);
+        }
+        return newAd;
       }).toList();
     } catch (_) {
       // Keep whatever was cached before - display freshness isn't worth
@@ -362,11 +376,24 @@ class AdService {
         // failed after the counter update had already landed, a retry on
         // the next flush would resend the same totals and double-count
         // the ads.views/clicks increment.
+        final adRef = FirebaseFirestore.instance.collection('ads').doc(ad.adId);
         final batch = FirebaseFirestore.instance.batch();
-        batch.update(FirebaseFirestore.instance.collection('ads').doc(ad.adId), {
+        batch.update(adRef, {
           'views': FieldValue.increment(totalViews),
           'clicks': FieldValue.increment(totalClicks),
         });
+        // Same totals, split into a per-day breakdown (ad_analytics/{day})
+        // alongside the all-time counters above - lets the ad owner see a
+        // trend over time, not just the running total. `set` + `merge`
+        // (not `update`) since a given day's doc may not exist yet.
+        batch.set(
+          adRef.collection('ad_analytics').doc(_dayKey(DateTime.now())),
+          {
+            'views': FieldValue.increment(totalViews),
+            'clicks': FieldValue.increment(totalClicks),
+          },
+          SetOptions(merge: true),
+        );
 
         if (uid != null) {
           batch.set(

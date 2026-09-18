@@ -8,6 +8,7 @@ import 'package:flutter_application_1/pages/client/cart_page.dart';
 import 'package:flutter_application_1/pages/client/store_details/item_detail_sheet.dart';
 import 'package:flutter_application_1/pages/client/store_details/store_info_sheet.dart';
 import 'package:flutter_application_1/utils/ad_service.dart';
+import 'package:flutter_application_1/utils/order_reorder_service.dart';
 import 'package:flutter_application_1/utils/store_cart_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/url_utils.dart';
@@ -48,8 +49,23 @@ class _StoreDetailsState extends State<StoreDetails> {
   final _firestore = FirebaseFirestore.instance;
   final _scrollController = ScrollController();
 
+  // A field, not a getter/inline call re-evaluated on every build:
+  // StreamBuilder treats a new Stream instance as a different stream and
+  // resets to ConnectionState.waiting to resubscribe - calling
+  // StoreCartService.watch() straight in `stream:` (as both cart
+  // StreamBuilders below used to) replayed that reset on every unrelated
+  // setState in this page (scroll-driven tab updates, ad loading, ...).
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _cartStream =
+      StoreCartService.watch(widget.uid, widget.storeId);
+
   bool _isLoading = true;
   bool _hasError = false;
+  // Distinguishes "store missing entirely" from "store exists but is in a
+  // different city than the user's current one" - same rule as
+  // OrderReorderService.isStoreInUserCity/cart_page.dart's checkout guard,
+  // applied here to keep the user from browsing (let alone ordering from)
+  // a store delivery can't actually reach.
+  bool _cityMismatch = false;
   Map<String, dynamic>? _store;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _categories = [];
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _items = [];
@@ -59,6 +75,19 @@ class _StoreDetailsState extends State<StoreDetails> {
 
   String? _activeTabId;
   final Map<String, GlobalKey> _sectionKeys = {};
+  // Starts transparent (buttons float directly over the header image) and
+  // only turns solid white once scroll has moved past it - flipped by the
+  // same scroll listener that already tracks the active tab, so there's
+  // only the one listener.
+  bool _topBarSolid = false;
+  // Marks the real pinned tab bar's own rendered content (see
+  // _TabBarDelegate's optional `contentKey`) so the scroll listener can
+  // tell exactly when it's reached its stuck position (global y <= 0) -
+  // that, not "any scroll at all" (_topBarSolid fires much earlier), is
+  // the right moment to show the fixed duplicate below the top bar;
+  // showing it any earlier renders both at once, stacked.
+  final GlobalKey _tabBarMarkerKey = GlobalKey();
+  bool _showStickyTabBar = false;
 
   bool get _isArabic => widget.language == 'ar';
 
@@ -73,7 +102,8 @@ class _StoreDetailsState extends State<StoreDetails> {
   void dispose() {
     _scrollController.removeListener(_updateActiveTabFromScroll);
     _scrollController.dispose();
-    AdService.instance.flush();
+    // No AdService.flush() here - HomeShell owns the background flush
+    // timer for the whole session (see home_shell.dart).
     super.dispose();
   }
 
@@ -82,10 +112,31 @@ class _StoreDetailsState extends State<StoreDetails> {
       final storeSnap =
           await _firestore.collection('stores').doc(widget.storeId).get();
       if (!storeSnap.exists) {
-        if (mounted) setState(() => _hasError = true);
+        if (mounted) {
+          setState(() {
+            _hasError = true;
+            _isLoading = false;
+          });
+        }
         return;
       }
       final store = storeSnap.data()!;
+
+      final storeCity = store['city'] as String?;
+      final userDoc =
+          await _firestore.collection('users').doc(widget.uid).get();
+      final userCity = (userDoc.data()?['address']
+          as Map<String, dynamic>?)?['city'] as String?;
+      if (!OrderReorderService.citiesMatch(storeCity, userCity)) {
+        if (mounted) {
+          setState(() {
+            _hasError = true;
+            _cityMismatch = true;
+            _isLoading = false;
+          });
+        }
+        return;
+      }
 
       final results = await Future.wait([
         _firestore
@@ -114,8 +165,22 @@ class _StoreDetailsState extends State<StoreDetails> {
 
       _resolveDistance(store);
       _loadAd(store);
+      // A store owner can delete/deactivate an item, or just change its (or
+      // a group option's) price, after it's already sitting in someone's
+      // cart - checked here too (not just cart_page.dart) so the cart
+      // bar's count/total is already correct the moment this page opens,
+      // not just once the user happens to open the cart itself. No alert
+      // here (unlike cart_page.dart) - _cartStream already reflects the
+      // removal/price change live in the cart bar, which is feedback
+      // enough on this page.
+      StoreCartService.syncWithCatalog(widget.uid, widget.storeId);
     } catch (_) {
-      if (mounted) setState(() => _hasError = true);
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -165,11 +230,12 @@ class _StoreDetailsState extends State<StoreDetails> {
     return '${now.year}-${pad(now.month)}-${pad(now.day)}-${pad(now.hour)}';
   }
 
-  Future<void> _loadAd(Map<String, dynamic> store) async {
-    final city = store['city'] as String?;
-    if (city == null) return;
-    await AdService.instance.refresh(city);
-
+  // No refresh()/startAutoFlush() here - HomeShell already keeps the
+  // shared ad cache refreshed (for the user's own city - stores outside it
+  // aren't reachable at all, see the city check in _load()) and the flush
+  // timer running for the whole session (see home_shell.dart); this just
+  // reads whatever's cached.
+  void _loadAd(Map<String, dynamic> store) {
     final trendLevel = (store['trend_level'] as num?)?.toInt() ?? 0;
     final trendTime = store['trend_time'] as String?;
     final isTrending = trendLevel <= 10 && trendTime == _currentTrendHourKey();
@@ -177,7 +243,6 @@ class _StoreDetailsState extends State<StoreDetails> {
 
     final ad = AdService.instance.nextAdFor(position);
     if (ad != null) AdService.instance.recordView(ad, position);
-    AdService.instance.startAutoFlush();
     if (mounted) {
       setState(() {
         _ad = ad;
@@ -211,6 +276,13 @@ class _StoreDetailsState extends State<StoreDetails> {
     return _items.where((doc) => doc.data()['category'] == categoryId).toList();
   }
 
+  /// `_categories` is every category doc, in menu order - `_items` is
+  /// already filtered to `exist == true` only. A category with zero items,
+  /// or whose only items have `exist == false`, has nothing to show, so it
+  /// shouldn't get a tab or an (empty) section header either.
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> get _visibleCategories =>
+      _categories.where((c) => _itemsForCategory(c.id).isNotEmpty).toList();
+
   void _updateActiveTabFromScroll() {
     const activationLine = 150.0;
     String? closest;
@@ -226,8 +298,31 @@ class _StoreDetailsState extends State<StoreDetails> {
         closest = entry.key;
       }
     }
-    if (closest != null && closest != _activeTabId) {
-      setState(() => _activeTabId = closest);
+    final solid = _scrollController.offset > 10;
+
+    // Whether the real pinned tab bar has actually reached its stuck
+    // position yet (global y <= 0, i.e. flush with the top of the screen -
+    // once pinned it can't go any further, so this never goes negative in
+    // practice, just settles at ~0). Before that point it's still further
+    // down the page in its normal scroll position, uncovered and already
+    // visible on its own - showing the fixed duplicate any earlier would
+    // put both on screen at once.
+    var stickyTabBar = _showStickyTabBar;
+    final markerBox =
+        _tabBarMarkerKey.currentContext?.findRenderObject() as RenderBox?;
+    if (markerBox != null && markerBox.attached) {
+      stickyTabBar = markerBox.localToGlobal(Offset.zero).dy <= 0.5;
+    }
+
+    final tabChanged = closest != null && closest != _activeTabId;
+    if (tabChanged ||
+        solid != _topBarSolid ||
+        stickyTabBar != _showStickyTabBar) {
+      setState(() {
+        if (tabChanged) _activeTabId = closest;
+        _topBarSolid = solid;
+        _showStickyTabBar = stickyTabBar;
+      });
     }
   }
 
@@ -278,10 +373,123 @@ class _StoreDetailsState extends State<StoreDetails> {
                         bottom: 0,
                         child: _buildCartBar(),
                       ),
+                      // The tab bar's own SliverPersistentHeader is already
+                      // pinned inside the scroll view, but that pins it at
+                      // y=0 - exactly where the top bar (below) sits once
+                      // solid, so the top bar paints over and hides it. This
+                      // is a second, fixed copy of the same tab bar,
+                      // positioned right below the top bar - shown only
+                      // once the REAL one has actually reached its stuck
+                      // position (`_showStickyTabBar`, measured via
+                      // `_tabBarMarkerKey`), not just "any scroll at all"
+                      // (`_topBarSolid` fires much earlier than that) -
+                      // showing this any sooner would render both the real
+                      // tab bar and this duplicate on screen at once.
+                      if (_showStickyTabBar)
+                        Positioned(
+                          top: _topBarHeight + MediaQuery.of(context).padding.top,
+                          left: 0,
+                          right: 0,
+                          // The real sliver gets its height enforced by the
+                          // SliverPersistentHeader framework (minExtent/
+                          // maxExtent) - this direct copy doesn't, so
+                          // without an explicit height here the ListView
+                          // inside it gets unbounded height and throws.
+                          height: 56,
+                          child: _buildStickyTabBar(),
+                        ),
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: _buildTopBar(),
+                      ),
                     ],
                   ),
       ),
     );
+  }
+
+  /// Back/info buttons, fixed at the very top of the screen (outside the
+  /// scroll view, so they never move) - transparent, floating directly over
+  /// the header image, until scroll passes it, then it becomes a solid
+  /// white bar. Driven by `_topBarSolid`, flipped in the same scroll
+  /// listener that already tracks the active category tab.
+  static const double _topBarHeight = 52;
+
+  Widget _buildTopBar() {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      color: _topBarSolid ? Colors.white : Colors.transparent,
+      padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
+      child: SizedBox(
+        height: _topBarHeight,
+        child: Row(
+          children: [
+            const SizedBox(width: 16),
+            _topBarButton(
+              icon: _isArabic ? Icons.arrow_forward : Icons.arrow_back,
+              onTap: () => Navigator.of(context).pop(),
+            ),
+            const Spacer(),
+            _topBarButton(
+              icon: Icons.info_outline,
+              onTap: () => showStoreInfoSheet(
+                context: context,
+                language: widget.language,
+                storeId: widget.storeId,
+                phone: _store!['phone'] as String? ?? '',
+                rate: (_store!['rate'] as num?)?.toDouble() ?? 0,
+                rateNumbers: (_store!['rate_numbers'] as num?)?.toInt() ?? 0,
+              ),
+            ),
+            const SizedBox(width: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _topBarButton({required IconData icon, required VoidCallback onTap}) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: onTap,
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.08),
+              blurRadius: 6,
+            ),
+          ],
+        ),
+        child: Icon(icon, color: Colors.black, size: 18),
+      ),
+    );
+  }
+
+  /// The fixed copy of the category tab bar shown once `_topBarSolid` -
+  /// built through the same `_TabBarDelegate` the real pinned sliver below
+  /// uses (its `build` is a plain method, callable outside the sliver
+  /// framework), so both stay visually identical without duplicating the
+  /// chip-row UI.
+  Widget _buildStickyTabBar() {
+    final hasPopulaire = _populaireItems.isNotEmpty;
+    final categories = _visibleCategories;
+    final activeTabId = _activeTabId ??
+        (hasPopulaire ? 'populaire' : (categories.isEmpty ? null : categories.first.id));
+    return _TabBarDelegate(
+      isArabic: _isArabic,
+      hasPopulaire: hasPopulaire,
+      categories: categories,
+      language: widget.language,
+      activeTabId: activeTabId,
+      onTap: _onTabTap,
+    ).build(context, 0, false);
   }
 
   /// Grey placeholder shaped like the real page (header image, overlapping
@@ -339,7 +547,8 @@ class _StoreDetailsState extends State<StoreDetails> {
         Stack(
           clipBehavior: Clip.none,
           children: [
-            Container(height: _headerImageHeight, color: const Color(0xFFEDEFF2)),
+            Container(
+                height: _headerImageHeight, color: const Color(0xFFEDEFF2)),
             Positioned(
               top: _headerImageHeight - _infoCardOverlap,
               left: 16,
@@ -378,8 +587,7 @@ class _StoreDetailsState extends State<StoreDetails> {
           ],
         ),
         Padding(
-          padding: EdgeInsets.fromLTRB(
-              16, _infoCardOverlap + 20, 16, 0),
+          padding: EdgeInsets.fromLTRB(16, _infoCardOverlap + 20, 16, 0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -402,12 +610,18 @@ class _StoreDetailsState extends State<StoreDetails> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.store_mall_directory_outlined,
-                size: 64, color: Colors.grey[400]),
+            Icon(
+                _cityMismatch
+                    ? Icons.location_off_outlined
+                    : Icons.store_mall_directory_outlined,
+                size: 64,
+                color: Colors.grey[400]),
             const SizedBox(height: 16),
             Text(
-              TranslationHelper.get('store_not_found'),
+              TranslationHelper.get(
+                  _cityMismatch ? 'reorder_different_city' : 'store_not_found'),
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+              textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
             ElevatedButton(
@@ -438,7 +652,7 @@ class _StoreDetailsState extends State<StoreDetails> {
     // ever touches one concrete line (the first one found) since it can't
     // know which configuration the user means to reduce.
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: StoreCartService.watch(widget.uid, widget.storeId),
+      stream: _cartStream,
       builder: (context, snapshot) {
         final cartData = snapshot.data?.data();
         final waitingPayment = cartData?['waiting_payment'] == true;
@@ -484,7 +698,8 @@ class _StoreDetailsState extends State<StoreDetails> {
                   ),
                   Column(
                     children: [
-                      const SizedBox(height: _headerImageHeight - _infoCardOverlap),
+                      const SizedBox(
+                          height: _headerImageHeight - _infoCardOverlap),
                       _buildInfoCard(),
                     ],
                   ),
@@ -517,13 +732,16 @@ class _StoreDetailsState extends State<StoreDetails> {
               delegate: _TabBarDelegate(
                 isArabic: _isArabic,
                 hasPopulaire: hasPopulaire,
-                categories: _categories,
+                categories: _visibleCategories,
                 language: widget.language,
                 activeTabId: _activeTabId ??
                     (hasPopulaire
                         ? 'populaire'
-                        : (_categories.isEmpty ? null : _categories.first.id)),
+                        : (_visibleCategories.isEmpty
+                            ? null
+                            : _visibleCategories.first.id)),
                 onTap: _onTabTap,
+                contentKey: _tabBarMarkerKey,
               ),
             ),
             if (hasPopulaire)
@@ -542,7 +760,7 @@ class _StoreDetailsState extends State<StoreDetails> {
                   ),
                 ),
               ),
-            for (final category in _categories)
+            for (final category in _visibleCategories)
               SliverToBoxAdapter(
                 child: _buildSection(
                   category.id,
@@ -572,64 +790,21 @@ class _StoreDetailsState extends State<StoreDetails> {
     return KeyedSubtree(key: key, child: child);
   }
 
+  // Back/info buttons live in the pinned _TopBarDelegate above this now,
+  // not floating over the image - so this is just the image.
   Widget _buildHeaderImage() {
     final image = _store!['image'] as String? ?? widget.imageUrl;
-    return Stack(
-      children: [
-        SizedBox(
-          height: _headerImageHeight,
-          width: double.infinity,
-          child: image.isNotEmpty
-              ? CachedNetworkImage(
-                  imageUrl: image,
-                  fit: BoxFit.cover,
-                  placeholder: (c, u) => Container(color: Colors.grey[300]),
-                  errorWidget: (c, u, e) => Container(color: Colors.grey[300]),
-                )
-              : Container(color: Colors.grey[300]),
-        ),
-        Positioned(
-          top: 44,
-          left: _isArabic ? null : 16,
-          right: _isArabic ? 16 : null,
-          child: _circleButton(
-            icon: _isArabic ? Icons.arrow_forward : Icons.arrow_back,
-            onTap: () => Navigator.of(context).pop(),
-          ),
-        ),
-        Positioned(
-          top: 44,
-          left: _isArabic ? 16 : null,
-          right: _isArabic ? null : 16,
-          child: _circleButton(
-            icon: Icons.info_outline,
-            onTap: () => showStoreInfoSheet(
-              context: context,
-              language: widget.language,
-              storeId: widget.storeId,
-              phone: _store!['phone'] as String? ?? '',
-              rate: (_store!['rate'] as num?)?.toDouble() ?? 0,
-              rateNumbers: (_store!['rate_numbers'] as num?)?.toInt() ?? 0,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _circleButton({required IconData icon, required VoidCallback onTap}) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(20),
-      onTap: onTap,
-      child: Container(
-        width: 36,
-        height: 36,
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.35),
-          shape: BoxShape.circle,
-        ),
-        child: Icon(icon, color: Colors.white, size: 18),
-      ),
+    return SizedBox(
+      height: _headerImageHeight,
+      width: double.infinity,
+      child: image.isNotEmpty
+          ? CachedNetworkImage(
+              imageUrl: image,
+              fit: BoxFit.cover,
+              placeholder: (c, u) => Container(color: Colors.grey[300]),
+              errorWidget: (c, u, e) => Container(color: Colors.grey[300]),
+            )
+          : Container(color: Colors.grey[300]),
     );
   }
 
@@ -991,7 +1166,7 @@ class _StoreDetailsState extends State<StoreDetails> {
           const SizedBox(height: 10),
           if (showType == 'row')
             SizedBox(
-              height: 190,
+              height: 160,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 itemCount: items.length,
@@ -1192,22 +1367,55 @@ class _StoreDetailsState extends State<StoreDetails> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ClipRRect(
-              borderRadius:
-                  const BorderRadius.vertical(top: Radius.circular(16)),
-              child: AspectRatio(
-                aspectRatio: 16 / 10,
-                child: image.isNotEmpty
-                    ? CachedNetworkImage(
-                        imageUrl: image,
-                        fit: BoxFit.cover,
-                        placeholder: (c, u) =>
-                            Container(color: Colors.grey[200]),
-                        errorWidget: (c, u, e) =>
-                            Container(color: Colors.grey[200]),
-                      )
-                    : Container(color: Colors.grey[200]),
-              ),
+            // The add/stepper control sits ON the image's bottom edge
+            // instead of its own row below the price - that row is what
+            // used to set this card's height, so dropping it makes the row
+            // of cards noticeably shorter.
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                ClipRRect(
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(16)),
+                  child: AspectRatio(
+                    aspectRatio: 16 / 10,
+                    child: image.isNotEmpty
+                        ? CachedNetworkImage(
+                            imageUrl: image,
+                            fit: BoxFit.cover,
+                            placeholder: (c, u) =>
+                                Container(color: Colors.grey[200]),
+                            errorWidget: (c, u, e) =>
+                                Container(color: Colors.grey[200]),
+                          )
+                        : Container(color: Colors.grey[200]),
+                  ),
+                ),
+                Positioned(
+                  right: 8,
+                  bottom: 8,
+                  child: cartLocked
+                      ? Container(
+                          width: 26,
+                          height: 26,
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.lock_outline,
+                              color: Color(0xFFC9CDD4), size: 14),
+                        )
+                      : cartSummary != null
+                          ? _buildQuantityStepper(
+                              cartSummary.firstLine,
+                              cartSummary.totalQuantity,
+                              () => _openItemSheet(item),
+                              small: true,
+                            )
+                          : _addButton(() => _openItemSheet(item),
+                              small: true),
+                ),
+              ],
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
@@ -1224,46 +1432,15 @@ class _StoreDetailsState extends State<StoreDetails> {
                       color: Color(0xFF2E3A59),
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  if (!cartLocked && cartSummary != null) ...[
-                    // The stepper is wider than the plain "+" button - on
-                    // its own full-width row below the price instead of
-                    // squeezed beside it, so it can't push the price text
-                    // outside the (narrow, 140px) card.
-                    Text(
-                      '${price.toStringAsFixed(0)} ${TranslationHelper.get('currency_unit')}',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: Color(0xFFFF9800),
-                      ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${price.toStringAsFixed(0)} ${TranslationHelper.get('currency_unit')}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFFFF9800),
                     ),
-                    const SizedBox(height: 6),
-                    _buildQuantityStepper(
-                      cartSummary.firstLine,
-                      cartSummary.totalQuantity,
-                      () => _openItemSheet(item),
-                      small: true,
-                    ),
-                  ] else
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          '${price.toStringAsFixed(0)} ${TranslationHelper.get('currency_unit')}',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: Color(0xFFFF9800),
-                          ),
-                        ),
-                        if (cartLocked)
-                          const Icon(Icons.lock_outline,
-                              color: Color(0xFFC9CDD4), size: 16)
-                        else
-                          _addButton(() => _openItemSheet(item), small: true),
-                      ],
-                    ),
+                  ),
                 ],
               ),
             ),
@@ -1293,7 +1470,7 @@ class _StoreDetailsState extends State<StoreDetails> {
 
   Widget _buildCartBar() {
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: StoreCartService.watch(widget.uid, widget.storeId),
+      stream: _cartStream,
       builder: (context, snapshot) {
         final lines = StoreCartService.linesFrom(snapshot.data?.data());
         final itemCount = lines.fold<int>(0, (acc, l) => acc + l.quantity);
@@ -1393,6 +1570,7 @@ class _StoreDetailsState extends State<StoreDetails> {
   }
 }
 
+
 /// Sticky category tab bar: a "Populaire" chip first (if that section
 /// exists), then one per category, with a right-edge fade hinting more
 /// scroll.
@@ -1403,6 +1581,11 @@ class _TabBarDelegate extends SliverPersistentHeaderDelegate {
   final String language;
   final String? activeTabId;
   final ValueChanged<String> onTap;
+  // Only set on the real pinned sliver's own delegate (never on the fixed
+  // duplicate copy built directly from another instance - two mounted
+  // widgets can't share one GlobalKey) - lets the page's scroll listener
+  // measure this content's actual position to know when it's become stuck.
+  final Key? contentKey;
 
   _TabBarDelegate({
     required this.isArabic,
@@ -1411,6 +1594,7 @@ class _TabBarDelegate extends SliverPersistentHeaderDelegate {
     required this.language,
     required this.activeTabId,
     required this.onTap,
+    this.contentKey,
   });
 
   @override
@@ -1422,6 +1606,7 @@ class _TabBarDelegate extends SliverPersistentHeaderDelegate {
   Widget build(
       BuildContext context, double shrinkOffset, bool overlapsContent) {
     return Container(
+      key: contentKey,
       color: const Color(0xFFF6F7F9),
       child: Stack(
         children: [

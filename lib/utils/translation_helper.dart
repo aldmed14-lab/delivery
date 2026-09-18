@@ -5,6 +5,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 class TranslationHelper {
   static Map<String, String>? _translations;
 
+  // The language code loadTranslations was last called with - most widgets
+  // already get `language` passed down from whatever page created them,
+  // but something rendered outside any specific page (e.g. a global
+  // overlay wired into MaterialApp.builder) has no page context to read it
+  // from, so it reads this static instead.
+  static String currentLanguage = 'fr';
+
   // Load the translations from JSON file based on the selected language
   static Future<void> loadTranslations(String language) async {
     String jsonString;
@@ -16,6 +23,7 @@ class TranslationHelper {
         jsonString = await rootBundle.loadString('lib/translation/fr.json');
     }
     _translations = Map<String, String>.from(json.decode(jsonString));
+    currentLanguage = language;
   }
 
   // Get the translation for a given key. Pass [params] to substitute

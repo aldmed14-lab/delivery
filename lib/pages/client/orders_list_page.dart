@@ -11,11 +11,56 @@ import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/url_utils.dart';
 import 'package:flutter_application_1/widgets/sponsored_ad_card.dart';
 
+/// One step in an active order's life, derived from `order_status` +
+/// `delivery_status` (`lib/map.txt`) - `order_status` alone only
+/// distinguishes "placed" | "accepted" | "preparing" | "ready" (it doesn't
+/// track the delivery leg at all), so once an order is "ready",
+/// `delivery_status` picks out which of the three delivery-side stages
+/// it's actually in.
+enum _OrderStage { placed, accepted, preparing, ready, onTheWay, arrived }
+
+_OrderStage _stageOf(Map<String, dynamic> data) {
+  final orderStatus = data['order_status'] as String? ?? 'placed';
+  switch (orderStatus) {
+    case 'placed':
+      return _OrderStage.placed;
+    case 'accepted':
+      return _OrderStage.accepted;
+    case 'preparing':
+      return _OrderStage.preparing;
+    default:
+      // "ready" - delivery_status picks the finer-grained stage. Anything
+      // not yet "on_the_way"/"arrived" (pending, assigned,
+      // arrived_to_store, picked_up) still just reads as "ready".
+      final deliveryStatus = data['delivery_status'] as String? ?? 'pending';
+      if (deliveryStatus == 'on_the_way') return _OrderStage.onTheWay;
+      if (deliveryStatus == 'arrived') return _OrderStage.arrived;
+      return _OrderStage.ready;
+  }
+}
+
+String _stageLabelKey(_OrderStage stage) {
+  switch (stage) {
+    case _OrderStage.placed:
+      return 'order_status_placed_label';
+    case _OrderStage.accepted:
+      return 'order_status_accepted_label';
+    case _OrderStage.preparing:
+      return 'order_status_preparing_label';
+    case _OrderStage.ready:
+      return 'order_status_ready_label';
+    case _OrderStage.onTheWay:
+      return 'order_status_on_the_way_label';
+    case _OrderStage.arrived:
+      return 'order_status_arrived_label';
+  }
+}
+
 /// The client's live view of what's happening right now - carts stuck
 /// waiting on payment (`users/{uid}/carts` with `waiting_payment: true`)
-/// and in-progress orders (top-level `orders`, `order_status` not yet
-/// "completed"/"cancelled"). Finished orders live on
-/// [OrderHistoryListPage] instead.
+/// and in-progress orders (top-level `orders`, `order_end: false`).
+/// Finished orders (`order_end: true`) live on [OrderHistoryListPage]
+/// instead.
 class OrdersListPage extends StatefulWidget {
   final String language;
   const OrdersListPage(this.language, {super.key});
@@ -25,21 +70,6 @@ class OrdersListPage extends StatefulWidget {
 }
 
 class _OrdersListPageState extends State<OrdersListPage> {
-  static const _activeStatuses = ['placed', 'accepted', 'preparing', 'ready'];
-
-  // Order statuses meaning "the store is still assembling it" - anything
-  // past that (ready, or any delivery_status beyond pending) reads as
-  // "on its way" instead. Coarser than the full order/delivery status
-  // pipeline in `lib/map.txt`, but this is an overview list - the exact
-  // stage-by-stage detail belongs to [LiveOrderPage].
-  static const _deliveringDeliveryStatuses = [
-    'assigned',
-    'arrived_to_store',
-    'picked_up',
-    'on_the_way',
-    'arrived',
-  ];
-
   final _firestore = FirebaseFirestore.instance;
   final _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
   CachedAd? _ad;
@@ -61,7 +91,7 @@ class _OrdersListPageState extends State<OrdersListPage> {
       _firestore
           .collection('orders')
           .where('user_id', isEqualTo: _uid)
-          .where('order_status', whereIn: _activeStatuses)
+          .where('order_end', isEqualTo: false)
           .orderBy('created_at', descending: true)
           .snapshots();
 
@@ -71,27 +101,14 @@ class _OrdersListPageState extends State<OrdersListPage> {
     _loadAd();
   }
 
-  @override
-  void dispose() {
-    AdService.instance.flush();
-    super.dispose();
-  }
-
-  Future<void> _loadAd() async {
-    try {
-      final userDoc = await _firestore.collection('users').doc(_uid).get();
-      final city =
-          (userDoc.data()?['address'] as Map<String, dynamic>?)?['city']
-              as String?;
-      if (city == null || city.isEmpty) return;
-      await AdService.instance.refresh(city);
-      final ad = AdService.instance.nextAdFor('orders_list');
-      if (ad != null) AdService.instance.recordView(ad, 'orders_list');
-      AdService.instance.startAutoFlush();
-      if (mounted) setState(() => _ad = ad);
-    } catch (_) {
-      // Ad slot just stays empty - not worth failing the page over.
-    }
+  // No dispose-time AdService.flush()/refresh() here - HomeShell owns the
+  // background refresh/flush timers for the whole session (see
+  // home_shell.dart), so every ad-showing page just reads whatever's
+  // already cached instead of managing that lifecycle itself.
+  void _loadAd() {
+    final ad = AdService.instance.nextAdFor('orders_list');
+    if (ad != null) AdService.instance.recordView(ad, 'orders_list');
+    if (mounted) setState(() => _ad = ad);
   }
 
   void _handleAdTap(CachedAd ad) {
@@ -182,7 +199,8 @@ class _OrdersListPageState extends State<OrdersListPage> {
 
     final items = <Widget>[];
     if (waitingCarts.isNotEmpty) {
-      items.add(_buildSectionLabel('waiting_payment_title', const Color(0xFFE74C3C)));
+      items.add(
+          _buildSectionLabel('waiting_payment_title', const Color(0xFFE74C3C)));
       items.add(const SizedBox(height: 10));
       for (final cart in waitingCarts) {
         items.add(Padding(
@@ -204,7 +222,8 @@ class _OrdersListPageState extends State<OrdersListPage> {
     }
 
     if (activeOrders.isNotEmpty) {
-      items.add(_buildSectionLabel('nav_current_orders', const Color(0xFF1B8A3E)));
+      items.add(
+          _buildSectionLabel('nav_current_orders', const Color(0xFF1B8A3E)));
       items.add(const SizedBox(height: 10));
       for (final order in activeOrders) {
         items.add(Padding(
@@ -346,7 +365,8 @@ class _OrdersListPageState extends State<OrdersListPage> {
     );
   }
 
-  Widget _buildWaitingCartCard(QueryDocumentSnapshot<Map<String, dynamic>> cart) {
+  Widget _buildWaitingCartCard(
+      QueryDocumentSnapshot<Map<String, dynamic>> cart) {
     final data = cart.data();
     final storeNameAr = data['store_name_ar'] as String? ?? '';
     final storeNameFr = data['store_name_fr'] as String? ?? '';
@@ -380,7 +400,8 @@ class _OrdersListPageState extends State<OrdersListPage> {
     );
   }
 
-  Widget _buildActiveOrderCard(QueryDocumentSnapshot<Map<String, dynamic>> order) {
+  Widget _buildActiveOrderCard(
+      QueryDocumentSnapshot<Map<String, dynamic>> order) {
     final data = order.data();
     final storeNameAr = data['store_name_ar'] as String? ?? '';
     final storeNameFr = data['store_name_fr'] as String? ?? '';
@@ -395,11 +416,39 @@ class _OrdersListPageState extends State<OrdersListPage> {
         0, (acc, l) => acc + (((l as Map)['quantity'] as num?)?.toInt() ?? 0));
     final total = (data['total'] as num?)?.toDouble() ?? 0;
 
-    final orderStatus = data['order_status'] as String? ?? 'placed';
-    final deliveryStatus = data['delivery_status'] as String? ?? 'pending';
-    final isDelivering = orderStatus == 'ready' ||
-        _deliveringDeliveryStatuses.contains(deliveryStatus);
-    final progress = isDelivering ? 0.75 : 0.3;
+    // The page's query filters to order_end == false, so a cancelled order
+    // is not expected to still be "active" - but order_status does allow
+    // "cancelled" (`lib/map.txt`), and _stageOf has no case for it (falls
+    // through to its "ready" default), which would otherwise mislabel a
+    // cancelled order as ready-with-progress-bar if one ever slipped
+    // through. Handled explicitly here instead, same status pill as
+    // OrderHistoryListPage/OrderHistoryDetailPage use, with no progress bar.
+    final isCancelled = data['order_status'] == 'cancelled';
+    if (isCancelled) {
+      return InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => LiveOrderPage(widget.language, order.id),
+          ),
+        ),
+        child: _buildOrderLikeCard(
+          storeName: storeName,
+          storeImage: storeImage,
+          itemCount: itemCount,
+          total: total,
+          pillLabel: TranslationHelper.get('order_status_cancelled'),
+          pillColor: const Color(0xFFE74C3C),
+          pillBg: const Color(0xFFFDF1F0),
+        ),
+      );
+    }
+
+    final stage = _stageOf(data);
+    final isDelivering =
+        stage == _OrderStage.onTheWay || stage == _OrderStage.arrived;
+    final progress = (stage.index + 1) / _OrderStage.values.length;
 
     return InkWell(
       borderRadius: BorderRadius.circular(16),
@@ -414,13 +463,14 @@ class _OrdersListPageState extends State<OrdersListPage> {
         storeImage: storeImage,
         itemCount: itemCount,
         total: total,
-        pillLabel: TranslationHelper.get(isDelivering
-            ? 'order_status_delivering_label'
-            : 'order_status_preparing_label'),
-        pillColor: isDelivering ? const Color(0xFF1B8A3E) : const Color(0xFFB8860B),
-        pillBg: isDelivering ? const Color(0xFFE6F7EA) : const Color(0xFFFFF3E0),
+        pillLabel: TranslationHelper.get(_stageLabelKey(stage)),
+        pillColor:
+            isDelivering ? const Color(0xFF1B8A3E) : const Color(0xFFB8860B),
+        pillBg:
+            isDelivering ? const Color(0xFFE6F7EA) : const Color(0xFFFFF3E0),
         progress: progress,
-        progressColor: isDelivering ? const Color(0xFF1B8A3E) : const Color(0xFFFF9800),
+        progressColor:
+            isDelivering ? const Color(0xFF1B8A3E) : const Color(0xFFFF9800),
       ),
     );
   }
@@ -462,7 +512,8 @@ class _OrdersListPageState extends State<OrdersListPage> {
                       ? CachedNetworkImage(
                           imageUrl: storeImage,
                           fit: BoxFit.cover,
-                          placeholder: (c, u) => Container(color: Colors.grey[200]),
+                          placeholder: (c, u) =>
+                              Container(color: Colors.grey[200]),
                           errorWidget: (c, u, e) => _buildPlaceholderImage(),
                         )
                       : _buildPlaceholderImage(),
@@ -488,19 +539,23 @@ class _OrdersListPageState extends State<OrdersListPage> {
                       '${TranslationHelper.get(itemCount == 1 ? 'cart_item_count_one' : 'cart_item_count_other', {
                             'count': itemCount
                           })} · ${total.toStringAsFixed(0)} ${TranslationHelper.get('currency_unit')}',
-                      style: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA1AC)),
+                      style: const TextStyle(
+                          fontSize: 12.5, color: Color(0xFF9AA1AC)),
                     ),
                   ],
                 ),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration:
-                    BoxDecoration(color: pillBg, borderRadius: BorderRadius.circular(10)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                    color: pillBg, borderRadius: BorderRadius.circular(10)),
                 child: Text(
                   pillLabel,
                   style: TextStyle(
-                      fontSize: 11, fontWeight: FontWeight.w800, color: pillColor),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: pillColor),
                 ),
               ),
             ],
@@ -525,7 +580,8 @@ class _OrdersListPageState extends State<OrdersListPage> {
   Widget _buildPlaceholderImage() {
     return Container(
       color: const Color(0xFFFFEFD9),
-      child: const Icon(Icons.store_rounded, color: Color(0xFFFF9800), size: 24),
+      child:
+          const Icon(Icons.store_rounded, color: Color(0xFFFF9800), size: 24),
     );
   }
 }

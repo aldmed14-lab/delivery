@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/pages/client/cart_page.dart';
+import 'package:flutter_application_1/pages/shared/help_page.dart';
 import 'package:flutter_application_1/utils/connection.dart';
 import 'package:flutter_application_1/utils/order_reorder_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
@@ -17,8 +18,7 @@ class OrderHistoryDetailPage extends StatefulWidget {
   const OrderHistoryDetailPage(this.language, this.orderId, {super.key});
 
   @override
-  State<OrderHistoryDetailPage> createState() =>
-      _OrderHistoryDetailPageState();
+  State<OrderHistoryDetailPage> createState() => _OrderHistoryDetailPageState();
 }
 
 class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
@@ -34,7 +34,34 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
   late final Future<DocumentSnapshot<Map<String, dynamic>>> _orderFuture =
       _firestore.collection('orders').doc(widget.orderId).get();
 
+  // `orders` has no `payment_type` field (`lib/map.txt`) - the payment
+  // method lives on the matching `users_transactions` doc instead. A cash
+  // order pays on delivery and never gets an `order_payment` transaction
+  // doc at all, so no match here just means cash.
+  late final Future<String> _paymentTypeFuture = _loadPaymentType();
+
+  Future<String> _loadPaymentType() async {
+    final snap = await _firestore
+        .collection('users_transactions')
+        .where('order_id', isEqualTo: widget.orderId)
+        .where('type', isEqualTo: 'order_payment')
+        .limit(1)
+        .get();
+    if (snap.docs.isEmpty) return '';
+    return snap.docs.first.data()['payment_type'] as String? ?? '';
+  }
+
   bool _isReordering = false;
+
+  // storeId isn't known until _orderFuture resolves, so it can't be a
+  // simple late final like _orderFuture/_paymentTypeFuture - cached lazily
+  // here instead, keyed so a rebuild (e.g. from _isReordering's setState)
+  // reuses the same Future rather than re-issuing the reorder-eligibility
+  // check on every rebuild.
+  Future<bool>? _canReorderFuture;
+  Future<bool> _canReorderFor(String storeId) {
+    return _canReorderFuture ??= OrderReorderService.canReorder(_uid, storeId);
+  }
 
   @override
   void dispose() {
@@ -92,12 +119,56 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
             ),
           ),
           const SizedBox(width: 10),
-          Text(
-            TranslationHelper.get('order_detail_title'),
-            style: const TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.w800,
-              color: Color(0xFF2E3A59),
+          Expanded(
+            child: Text(
+              TranslationHelper.get('order_detail_title'),
+              style: const TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF2E3A59),
+              ),
+            ),
+          ),
+          // Recency (< 3 days) no longer gates whether this button shows at
+          // all - HelpPage itself now branches on it once opened (see
+          // lib/note.txt way 3): recent -> the order's own report
+          // sub-questions, older -> just its info plus a can't-report
+          // notice. Passing orderId is what lets HelpPage tell which case
+          // this is.
+          InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => HelpPage(widget.language, orderId: widget.orderId),
+              ),
+            ),
+            child: Container(
+              height: 38,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFEFD9),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.help_outline_rounded,
+                    size: 17,
+                    color: Color(0xFFB8631A),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    TranslationHelper.get('help'),
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFFB8631A),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -218,7 +289,7 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
             ? storeNameFr
             : TranslationHelper.get('unknown_store'));
     final storeImage = data['store_image'] as String? ?? '';
-    final status = data['order_status'] as String? ?? 'completed';
+    final status = data['order_status'] as String? ?? 'ready';
     final orderNumber = data['order_number'] as String? ?? '';
     final isCancelled = status == 'cancelled';
     final statusLabel = TranslationHelper.get(
@@ -273,19 +344,24 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  TranslationHelper.get('order_number_label', {'number': orderNumber}),
-                  style: const TextStyle(fontSize: 12.5, color: Color(0xFFFF9800)),
+                  TranslationHelper.get(
+                      'order_number_label', {'number': orderNumber}),
+                  style:
+                      const TextStyle(fontSize: 12.5, color: Color(0xFFFF9800)),
                 ),
               ],
             ),
           ),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration:
-                BoxDecoration(color: statusBg, borderRadius: BorderRadius.circular(10)),
+            decoration: BoxDecoration(
+                color: statusBg, borderRadius: BorderRadius.circular(10)),
             child: Text(
               statusLabel,
-              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: statusColor),
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: statusColor),
             ),
           ),
         ],
@@ -296,7 +372,8 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
   Widget _buildPlaceholderImage() {
     return Container(
       color: const Color(0xFFFFEFD9),
-      child: const Icon(Icons.store_rounded, color: Color(0xFFFF9800), size: 24),
+      child:
+          const Icon(Icons.store_rounded, color: Color(0xFFFF9800), size: 24),
     );
   }
 
@@ -330,7 +407,8 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
   /// "large" pick and one "medium" pick of the same pizza) - merged here by
   /// `item_id` so each item shows as a single row (quantities/totals
   /// summed across its lines) instead of one row per line.
-  List<Map<String, dynamic>> _mergeLinesByItem(List<Map<String, dynamic>> lines) {
+  List<Map<String, dynamic>> _mergeLinesByItem(
+      List<Map<String, dynamic>> lines) {
     final merged = <String, Map<String, dynamic>>{};
     final order = <String>[];
     for (final line in lines) {
@@ -372,7 +450,9 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
           Text(
             '${quantity}x',
             style: const TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFFFF9800)),
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFFFF9800)),
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -381,13 +461,17 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
-                  fontSize: 13.5, fontWeight: FontWeight.w600, color: Color(0xFF2E3A59)),
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF2E3A59)),
             ),
           ),
           Text(
             '${total.toStringAsFixed(0)} ${TranslationHelper.get('currency_unit')}',
             style: const TextStyle(
-                fontSize: 13.5, fontWeight: FontWeight.w800, color: Color(0xFF2E3A59)),
+                fontSize: 13.5,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF2E3A59)),
           ),
         ],
       ),
@@ -417,7 +501,9 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
               style: TextStyle(
                 fontSize: 13,
                 fontWeight: FontWeight.w700,
-                color: negative ? const Color(0xFF1B8A3E) : const Color(0xFF2E3A59),
+                color: negative
+                    ? const Color(0xFF1B8A3E)
+                    : const Color(0xFF2E3A59),
               ),
             ),
           ],
@@ -452,12 +538,16 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
                 Text(
                   TranslationHelper.get('total_label'),
                   style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w800, color: Color(0xFF2E3A59)),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF2E3A59)),
                 ),
                 Text(
                   '${total.toStringAsFixed(0)} $currency',
                   style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFFFF9800)),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFFFF9800)),
                 ),
               ],
             ),
@@ -468,11 +558,11 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
   }
 
   Widget _buildDeliveryCard(Map<String, dynamic> data) {
-    final paymentType = data['payment_type'] as String? ?? '';
     final timestamp = (data['completed_at'] as Timestamp?) ??
         (data['delivered_at'] as Timestamp?) ??
         (data['created_at'] as Timestamp?);
-    final dateLabel = timestamp == null ? '' : _formatDateTime(timestamp.toDate());
+    final dateLabel =
+        timestamp == null ? '' : _formatDateTime(timestamp.toDate());
 
     return Container(
       padding: const EdgeInsets.all(14),
@@ -492,24 +582,32 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
             width: 36,
             height: 36,
             decoration: BoxDecoration(
-                color: const Color(0xFFFFF3E0), borderRadius: BorderRadius.circular(10)),
-            child: const Icon(Icons.payments_outlined, color: Color(0xFFFF9800), size: 18),
+                color: const Color(0xFFFFF3E0),
+                borderRadius: BorderRadius.circular(10)),
+            child: const Icon(Icons.payments_outlined,
+                color: Color(0xFFFF9800), size: 18),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  _paymentTypeLabel(paymentType),
-                  style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w800, color: Color(0xFF2E3A59)),
+                FutureBuilder<String>(
+                  future: _paymentTypeFuture,
+                  builder: (context, snapshot) => Text(
+                    _paymentTypeLabel(snapshot.data ?? ''),
+                    style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF2E3A59)),
+                  ),
                 ),
                 if (dateLabel.isNotEmpty) ...[
                   const SizedBox(height: 3),
                   Text(
                     dateLabel,
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
+                    style:
+                        const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
                   ),
                 ],
               ],
@@ -545,7 +643,7 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
 
   Widget _buildReorderBar(String storeId, Map<String, dynamic> data) {
     return FutureBuilder<bool>(
-      future: OrderReorderService.canReorder(_uid, storeId),
+      future: _canReorderFor(storeId),
       builder: (context, snapshot) {
         if (snapshot.data != true) return const SizedBox.shrink();
         return Container(
@@ -553,7 +651,10 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
           decoration: const BoxDecoration(
             color: Colors.white,
             boxShadow: [
-              BoxShadow(color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4)),
+              BoxShadow(
+                  color: Color(0x14000000),
+                  blurRadius: 12,
+                  offset: Offset(0, -4)),
             ],
           ),
           child: SizedBox(
@@ -566,18 +667,22 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
                 disabledBackgroundColor: const Color(0xFFFFC98A),
                 elevation: 0,
                 padding: const EdgeInsets.symmetric(vertical: 15),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14)),
               ),
               child: _isReordering
                   ? const SizedBox(
                       width: 20,
                       height: 20,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)),
+                          strokeWidth: 2,
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(Colors.white)),
                     )
                   : Text(
                       TranslationHelper.get('reorder_button'),
-                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w800),
                     ),
             ),
           ),
@@ -590,19 +695,24 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
     if (_isReordering) return;
     setState(() => _isReordering = true);
     try {
-      final result = await OrderReorderService.reorder(uid: _uid, orderData: data);
+      final result =
+          await OrderReorderService.reorder(uid: _uid, orderData: data);
       switch (result.outcome) {
         case ReorderOutcome.storeClosed:
-          showAlert(TranslationHelper.get('reorder_store_inactive'), isError: true);
+          showAlert(TranslationHelper.get('reorder_store_inactive'),
+              isError: true);
           break;
         case ReorderOutcome.differentCity:
-          showAlert(TranslationHelper.get('reorder_different_city'), isError: true);
+          showAlert(TranslationHelper.get('reorder_different_city'),
+              isError: true);
           break;
         case ReorderOutcome.waitingPayment:
-          showAlert(TranslationHelper.get('reorder_waiting_payment'), isError: true);
+          showAlert(TranslationHelper.get('reorder_waiting_payment'),
+              isError: true);
           break;
         case ReorderOutcome.allUnavailable:
-          showAlert(TranslationHelper.get('reorder_all_unavailable'), isError: true);
+          showAlert(TranslationHelper.get('reorder_all_unavailable'),
+              isError: true);
           break;
         case ReorderOutcome.partial:
           _openCartPage(

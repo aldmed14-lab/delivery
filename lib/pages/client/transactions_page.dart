@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_application_1/pages/shared/help_page.dart';
 import 'package:flutter_application_1/utils/connection.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 
@@ -28,6 +29,14 @@ class _TransactionsPageState extends State<TransactionsPage> {
       .collection('users_transactions')
       .where('user_id', isEqualTo: _uid)
       .orderBy('created_at', descending: true);
+
+  // A field, not a getter re-evaluated on every build: StreamBuilder treats
+  // a new Stream instance as a different stream and resets to
+  // ConnectionState.waiting to resubscribe, so a getter here would flash
+  // the balance to blank on every unrelated setState (e.g. "load more"
+  // toggling during pagination).
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _userStream =
+      _firestore.collection('users').doc(_uid).snapshots();
 
   final _scrollController = ScrollController();
   final List<QueryDocumentSnapshot<Map<String, dynamic>>> _transactions = [];
@@ -97,7 +106,8 @@ class _TransactionsPageState extends State<TransactionsPage> {
       setState(() {
         _transactions.addAll(snap.docs);
         if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
-        _hasMore = snap.docs.length == take && _transactions.length < _maxTransactions;
+        _hasMore =
+            snap.docs.length == take && _transactions.length < _maxTransactions;
         _isLoadingMore = false;
       });
     } catch (_) {
@@ -160,8 +170,47 @@ class _TransactionsPageState extends State<TransactionsPage> {
               ),
             ),
           ),
-          const SizedBox(width: 38),
+          _buildHelpButton(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildHelpButton() {
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => HelpPage(widget.language, startAtTransactionSearch: true),
+        ),
+      ),
+      child: Container(
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFEFD9),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.help_outline_rounded,
+              size: 17,
+              color: Color(0xFFB8631A),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              TranslationHelper.get('help'),
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFFB8631A),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -170,9 +219,10 @@ class _TransactionsPageState extends State<TransactionsPage> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
       child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        stream: _firestore.collection('users').doc(_uid).snapshots(),
+        stream: _userStream,
         builder: (context, snapshot) {
-          final credit = (snapshot.data?.data()?['wallet_balance'] as num?) ?? 0;
+          final credit =
+              (snapshot.data?.data()?['wallet_balance'] as num?) ?? 0;
           return Container(
             width: double.infinity,
             padding: const EdgeInsets.all(18),
@@ -365,13 +415,19 @@ class _TransactionsPageState extends State<TransactionsPage> {
     );
   }
 
-  Widget _buildTransactionRow(
-      QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+  Widget _buildTransactionRow(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data();
     final type = data['type'] as String? ?? 'order_payment';
     final status = data['status'] as String? ?? 'completed';
     final amount = (data['amount'] as num?)?.toDouble() ?? 0;
     final createdAt = (data['created_at'] as Timestamp?)?.toDate();
+    final number = data['transaction_number'] as String? ?? '';
+    // Same "#{number} — {type}" convention already used on the store/driver
+    // finance pages (store_finance_page.dart, delivery_finance_page.dart) -
+    // the transaction's own code was shown there but missing here.
+    final titleText = number.isEmpty
+        ? TranslationHelper.get('transaction_type_$type')
+        : '#$number — ${TranslationHelper.get('transaction_type_$type')}';
 
     final isCredit = type == 'refund';
     final icon = switch (type) {
@@ -380,7 +436,8 @@ class _TransactionsPageState extends State<TransactionsPage> {
       'deduction' => Icons.remove_circle_outline_rounded,
       _ => Icons.shopping_bag_outlined,
     };
-    final iconColor = isCredit ? const Color(0xFF1B8A3E) : const Color(0xFFFF9800);
+    final iconColor =
+        isCredit ? const Color(0xFF1B8A3E) : const Color(0xFFFF9800);
     final iconBg = isCredit ? const Color(0xFFE6F7EA) : const Color(0xFFFFF3E0);
 
     final isPending = status == 'pending';
@@ -419,7 +476,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  TranslationHelper.get('transaction_type_$type'),
+                  titleText,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -431,7 +488,8 @@ class _TransactionsPageState extends State<TransactionsPage> {
                 const SizedBox(height: 3),
                 Text(
                   _dateLabel(createdAt),
-                  style: const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC)),
+                  style:
+                      const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC)),
                 ),
               ],
             ),
@@ -444,14 +502,16 @@ class _TransactionsPageState extends State<TransactionsPage> {
                 style: TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w800,
-                  color: isCredit ? const Color(0xFF1B8A3E) : const Color(0xFF2E3A59),
+                  color: isCredit
+                      ? const Color(0xFF1B8A3E)
+                      : const Color(0xFF2E3A59),
                 ),
               ),
               const SizedBox(height: 4),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration:
-                    BoxDecoration(color: statusBg, borderRadius: BorderRadius.circular(8)),
+                decoration: BoxDecoration(
+                    color: statusBg, borderRadius: BorderRadius.circular(8)),
                 child: Text(
                   TranslationHelper.get('transaction_status_$status'),
                   style: TextStyle(

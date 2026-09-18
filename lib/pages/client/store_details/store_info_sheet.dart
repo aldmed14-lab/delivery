@@ -35,7 +35,25 @@ class _StoreInfoSheet extends StatelessWidget {
   final double rate;
   final int rateNumbers;
 
-  const _StoreInfoSheet({
+  // A field, not a call inside build(): DraggableScrollableSheet's
+  // `builder` re-invokes on every frame while the sheet is being dragged,
+  // so calling _loadReviews() straight from build() would re-issue all
+  // those Firestore reads (and flash the list back to loading) on every
+  // drag frame instead of once.
+  late final Future<List<MapEntry<String, Map<String, dynamic>>>>
+      _reviewsFuture = _loadReviews();
+
+  // Same reasoning as _reviewsFuture - cached so drag-triggered rebuilds
+  // don't re-fetch work_time on every frame.
+  late final Future<QuerySnapshot<Map<String, dynamic>>> _workTimeFuture =
+      FirebaseFirestore.instance
+          .collection('stores')
+          .doc(storeId)
+          .collection('work_time')
+          .orderBy('index')
+          .get();
+
+  _StoreInfoSheet({
     required this.language,
     required this.storeId,
     required this.phone,
@@ -140,12 +158,7 @@ class _StoreInfoSheet extends StatelessWidget {
 
   Widget _buildWorkTimeSection() {
     return FutureBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      future: FirebaseFirestore.instance
-          .collection('stores')
-          .doc(storeId)
-          .collection('work_time')
-          .orderBy('index')
-          .get(),
+      future: _workTimeFuture,
       builder: (context, snapshot) {
         if (!snapshot.hasData) {
           return const Padding(
@@ -283,15 +296,40 @@ class _StoreInfoSheet extends StatelessWidget {
     );
   }
 
+  /// `ratings/{id}` (`lib/map.txt`) - `id` is now a random Firestore id, not
+  /// the reviewer's uid (one user can leave a fresh review per order rather
+  /// than a single review overwritten each time), so the reviewer is
+  /// resolved from the doc's own `user_id` field instead of its id; their
+  /// display name still lives on `users/{user_id}.name` rather than being
+  /// duplicated onto the rating doc.
+  Future<List<MapEntry<String, Map<String, dynamic>>>> _loadReviews() async {
+    final ratingsSnap = await FirebaseFirestore.instance
+        .collection('stores')
+        .doc(storeId)
+        .collection('ratings')
+        .orderBy('created_at', descending: true)
+        .limit(5)
+        .get();
+
+    final names = await Future.wait(ratingsSnap.docs.map((doc) async {
+      final userId = doc.data()['user_id'] as String? ?? '';
+      if (userId.isEmpty) return '';
+      final userSnap = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get();
+      return userSnap.data()?['name'] as String? ?? '';
+    }));
+
+    return [
+      for (var i = 0; i < ratingsSnap.docs.length; i++)
+        MapEntry(names[i], ratingsSnap.docs[i].data()),
+    ];
+  }
+
   Widget _buildReviewsSection() {
-    return FutureBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      future: FirebaseFirestore.instance
-          .collection('stores')
-          .doc(storeId)
-          .collection('ratings')
-          .orderBy('created_at', descending: true)
-          .limit(5)
-          .get(),
+    return FutureBuilder<List<MapEntry<String, Map<String, dynamic>>>>(
+      future: _reviewsFuture,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return Text(
@@ -307,8 +345,8 @@ class _StoreInfoSheet extends StatelessWidget {
             ),
           );
         }
-        final docs = snapshot.data!.docs;
-        if (docs.isEmpty) {
+        final reviews = snapshot.data!;
+        if (reviews.isEmpty) {
           return Text(
             TranslationHelper.get('no_reviews_yet'),
             style: const TextStyle(fontSize: 13, color: Color(0xFF9AA1AC)),
@@ -316,9 +354,9 @@ class _StoreInfoSheet extends StatelessWidget {
         }
         return Column(
           children: [
-            for (int i = 0; i < docs.length; i++) ...[
-              _buildReviewRow(docs[i].data()),
-              if (i < docs.length - 1)
+            for (int i = 0; i < reviews.length; i++) ...[
+              _buildReviewRow(reviews[i].key, reviews[i].value),
+              if (i < reviews.length - 1)
                 const Divider(height: 20, color: Color(0xFFEDEFF2)),
             ],
           ],
@@ -327,8 +365,7 @@ class _StoreInfoSheet extends StatelessWidget {
     );
   }
 
-  Widget _buildReviewRow(Map<String, dynamic> data) {
-    final name = data['name'] as String? ?? '';
+  Widget _buildReviewRow(String name, Map<String, dynamic> data) {
     final rating = (data['rating'] as num?)?.toInt() ?? 0;
     final comment = data['comment'] as String? ?? '';
     return Column(

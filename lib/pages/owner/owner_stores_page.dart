@@ -81,11 +81,15 @@ class _OwnerStoresPageState extends State<OwnerStoresPage> {
 
     return {
       'store_id': storeId,
-      'name_ar': (linkData['name_ar'] as String?) ??
-          (storeData['name_ar'] as String?) ??
+      // The `stores` doc is the canonical name - `users/{uid}/stores`'s own
+      // name_ar/name_fr is just a denormalized copy (written once when the
+      // link was made) that can go stale if the store's name changes
+      // later, so it's only a fallback here, not the primary source.
+      'name_ar': (storeData['name_ar'] as String?) ??
+          (linkData['name_ar'] as String?) ??
           '',
-      'name_fr': (linkData['name_fr'] as String?) ??
-          (storeData['name_fr'] as String?) ??
+      'name_fr': (storeData['name_fr'] as String?) ??
+          (linkData['name_fr'] as String?) ??
           '',
       'image': (linkData['image'] as String?) ??
           (storeData['image'] as String?) ??
@@ -164,10 +168,26 @@ class _OwnerStoresPageState extends State<OwnerStoresPage> {
 
     if (_loadError != null) {
       return Center(
-        child: Text(
-          TranslationHelper.get(
-              isConnectivityError(_loadError!) ? 'no_internet' : 'error'),
-          style: const TextStyle(color: Color(0xFF9AA1AC)),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              TranslationHelper.get(
+                  isConnectivityError(_loadError!) ? 'no_internet' : 'error'),
+              style: const TextStyle(color: Color(0xFF9AA1AC)),
+            ),
+            const SizedBox(height: 16),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _isLoading = true;
+                  _loadError = null;
+                });
+                _loadStores();
+              },
+              child: Text(TranslationHelper.get('retry')),
+            ),
+          ],
         ),
       );
     }

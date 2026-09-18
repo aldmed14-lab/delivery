@@ -1,3 +1,30 @@
-// // bk_us1_1vcR06DGCbpdgbvVShEvq6Z36S7iy
+make Help Page in have 3 way to open it {
+    1: direct click in profile page in it show common question {Où est ma commande ?, problem with transaction, Frais de livraison, Demander un remboursement, Devenir livreur ou partenaire}
+    2: when open it in transaction page in it show first card have put transaction number when add it search where transaction_number and user_id if not exist show not exist return to 1 (be like direct click), if exist show reponse have amount, created_at, type, status, payment_type (if need it) and show questions in transaction_number
+    3: when click it in order_history_detail_page if order created_at < 3 days show same questions in order_number , else show his info and with notice can't report it and show common question (same as way 1)
+}
 
+when click to questions {
+    "Où est ma commande ?":  search order where user_id and order_end = false and show order_number with other button "return to questions" if not found eny order make other search where user_id, created_at < 3 days, limite 5 with "return to questions";
+    order_number: before showing the 3 sub-questions, search reports where order_id = this order && reporter = user_id && status in (pending, processing) -> if one exists, skip straight to showing its report_type + message (read-only, no new report can be filed while one is still open for this order) instead of the questions below. only once that report reaches status = completed can a new one be filed for the same order.
+    order_number: show questions {i don't get the order, missing items, problem in order, } :{
+        i don't get the order: show card to create report have message is in system have like "i don't receive the order" and other things it show if arabic setup with arabic text but when click send send it but with fr language (report_type = "user_order", reported = store_id, reporter = user_id, order_id = this order, transaction_id = order.transaction_id, city_id = order.city, status = "pending", priority = "hight", message); when click Annuler return to order_number questions
+        missing items: show card have the items (but not separed per line) with "+ 0 -" from 0 to item count when click continue must at least one item more than 0 and show card have message "i receive order but missing items : x1 item1, x3 item2 etc" when click send send it with report_type = "user_store", reported = store_id, reporter = user_id, order_id = this order, transaction_id = order.transaction_id, city_id = order.city, priority = "hight" , if Annuler rreturn to order_number questions
+        problem in order: show card have message box user write it and button for send and other for add images (report_type = "user_store", reported = store_id, reporter = user_id, order_id = this order, transaction_id = order.transaction_id, city_id = order.city, priority = "hight")
+    }
+    "problem with transaction": search transaction where user_id, created_at < 3days, limite 5, if not exist return to questions
+    transaction_number: before showing the 3 sub-questions, search reports where transaction_id = this transaction && reporter = user_id && status in (pending, processing) -> if one exists, skip straight to showing its report_type + message (read-only) instead of the questions below, same rule as order_number above.
+    transaction_number: show questions {i don't make this transaction(if type = "order_payment" or "withdraw"), why this deduction (if type = "deduction"), error in transaction}: {
+        "i don't make this transaction": show card have message box user write it and button for send (report_type = "user_system", reported = "system", reporter = user_id, transaction_id = this transaction, order_id = transaction.order_id, city_id = transaction.summary_section.address.city, status = "pending", priority = "hight")
+        "why this deduction": (the existing-report check above already covers this - if a report exists it was shown already) if none exists show questions "make report" when click it show card for make report (report_type = "user_system", reported = "system", reporter = user_id, transaction_id = this transaction, order_id = transaction.order_id, city_id = transaction.summary_section.address.city, status = "pending", priority = "hight")
+        "error in transaction": show card to report (report_type = "user_system", reported = "system", reporter = user_id, transaction_id = this transaction, order_id = transaction.order_id, city_id = transaction.summary_section.address.city, status = "pending", priority = "normal")
+    }
+    "Frais de livraison": get from city collection service_fee and delivery_fee and km_fee and rain_fee and make good text explain it
+    "Demander un remboursement": in this show text mean you need select a order or transaction have problem with it
+    "Devenir livreur ou partenaire" text have some thing like "we are very happy to join use click here to start" is link to web side will add later
 
+}
+note: for every questions show have button "return back"
+note: report_type list now covers every reason above - "user_order"/"user_store" for order-side, "user_system" for transaction-side (added to map.txt's reports.report_type enum - a user disputing something the system itself did, not a store/delivery complaint)
+note: add images button just where i say it
+note: every report created above also carries order_id and/or transaction_id and city_id (all already fields on reports in map.txt) so admin can trace it back to the source - only report_type/reported/reporter/status/priority/message were being set before

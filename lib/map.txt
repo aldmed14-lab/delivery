@@ -6,24 +6,23 @@ stores {
         name_fr
         status              // "open" | "trafic"| "close"
         phone
-        contact
         active               // this mean the store is active and have access to be can change status
         earnings
         cash_payment
         last_active
+        location_name
         lat
         lng
         geohash
-        trend_level
-        trend_time = "2026-08-17-22"
-        trend_score                // sort weight for trending order
+        trend_level  // trend rank
+        trend_score  // = trend_score*0.86 + orders_bucket
         orders_bucket // this is hour orders user to change trend evey start new hour
+        trend_time  // "2026-08-17-20" is YYYY-MM-DD-hour
         tags []
         rate
         rate_numbers
-        estimated_delivery_time
         min_order_price
-        created_by
+        estimated_prep_time
         created_at
         work_time (subcollection) {
             time_id {
@@ -53,6 +52,7 @@ stores {
                 description_ar
                 price
                 category
+                options []           // {option_id,name_ar, name_fr, price}
             }
         }
         groups (subcollection) {
@@ -72,15 +72,13 @@ stores {
                 role  "owner" | "staff"
                 name
                 phone
-                added_by
                 added_at
                 status          // "active" | "removed"
             }
         }
         ratings (subcollection) {
-            rating_id {
+            id {
                 user_id
-                name
                 rating           // 1-5
                 comment
                 created_at
@@ -97,21 +95,37 @@ delivery {
         geohash
         active
         is_online
+        last_assigned_at
+        pending_offer // false when there's none (never absent/missing - the find-courier query filters on pending_offer == false to skip drivers already mid-offer) - a map, shaped below, once one is sent:
+        {
+            order_id
+            offer_id
+            store {
+                name
+                lat
+                lng
+            }
+            address {
+                lat
+                lng
+            }
+            earning
+            expires_at
+        }
         rate
         rate_numbers
-        status
+        status // "available" | "busy"
         vehicle_type
         last_active
         identification {
             card_id
-            card_font_image
+            card_front_image
             card_back_image
         }
         completed_orders
         cancelled_orders
         payout_balance
         created_at
-        created_by
     }
 }
 
@@ -133,7 +147,7 @@ users {
         }
         locations (subcollection) {
             location_id {
-                name
+                location_name
                 lat
                 lng
                 city
@@ -141,8 +155,6 @@ users {
         }
         stores (subcollection) {
             store_id {
-                name_ar
-                name_fr
                 image
                 joined_at
             }
@@ -154,6 +166,8 @@ users {
             store_id
             transaction_id
             waiting_payment
+            payment_code // only set by an async provider (e.g. "test_payment") - denormalized from users_transactions so CartPage/OrdersListPage can show it without a second lookup
+            payment_image // denormalized from payment_types/{payment_type}.image, alongside payment_code
             "lines" {
                 "{line_key}" {
                     line_option
@@ -190,27 +204,43 @@ orders {
         store_name_ar
         store_name_fr
         store_image
-        order_status            // "placed" | "accepted" | "preparing" | "ready" | "completed" | "cancelled"
+        payment_type          // "cash_payment" | "wallet_balance" | "{payment_name}"
+        transaction_id // the users_transactions doc this order was paid through - null for a payment type that never creates one
+        order_status            // "placed" | "accepted" | "preparing" | "ready" |"cancelled"
         delivery_status          // "pending" | "assigned" | "arrived_to_store"| "picked_up" | "on_the_way" | "arrived" | "delivered"
+        call_admin  // boolean - set automatically by the courier-search hard cap (find-courier system, no driver after 10 min), OR by the customer's own "Call Admin" button on live_order_page.dart once the order is 30+ min past its estimated window (requestAdminCall Cloud Function) - either way, purely a signal for admin attention, never a kill switch on its own
+        admin_by
         created_at
+        city // denormalized from stores.city the moment the order is accepted (advanceOrderStatus) - find-courier system's candidate query needs an equality field to filter delivery docs by, orders never carried one before this
+        estimated_prep_time // denormalized from stores.estimated_prep_time at acceptance - both for the search's own timing (below) and for display, same reason it's also copied onto users_transactions.summary_section
+        search_active // boolean, default true - find-courier system, an ADMIN-ONLY kill switch. Nothing automated ever sets this false, only an explicit admin action - stops the whole search (including rejecting a still-pending accept, not just new offers)
+        searching_courier // boolean, default false - find-courier system, purely a display flag: true once the search has actually started (generation 1 claimed), never changes again. Not used for any race-prevention logic itself - search_number's transactional claim is what actually does that
+        search_number // int, default 0 - find-courier system, the fencing/generation counter. Every attempt (start, refusal-retry, timeout-retry, scheduled retry) claims the next number via one shared transaction before doing anything; a scheduled Cloud Task carries the number that was current when it was scheduled, and is a stale no-op if that number no longer matches by the time it fires
+        start_search_courier // find-courier system: set once, the moment generation 1 is actually claimed (whichever of the two triggers wins). The search's own elapsed-time clock (geohash tier, 2-min tried_delivery_ids reset) counts from this, not accepted_at, and never changes again afterward
+        tried_delivery_reset_window // find-courier system, internal bookkeeping only: which 2-minute window tried_delivery_ids was last reset for (an integer), so repeated "no driver found" retries within the same window don't wipe the list every single time
         accepted_at
+        rating_submitted
         ready_at
         picked_up_at
+        conversation_id
         delivered_at
         cancelled_at
         completed_at
         subtotal
         delivery_fee
         service_fee
+        promotion_code
         discount
+        deduction
         total
-        store_address { lat, lng}
+        store_address { lat, lng,geohash}
         user_address { lat, lng }
         notes
         order_number
-        payment_type
-        estimated_delivery_time
+        order_end
         last_update
+        tried_delivery_ids [] // find-courier system: driver uids already offered + refused/timed out for this order
+        courier_search_status // "no_driver_found" - find-courier system, set at the top of every retry cycle while actively searching; absent once a driver is offered or assigned. searching_courier (above) is the plain "is it searching at all" flag
         "lines" {
                 "{line_key}" {
                     line_option
@@ -221,6 +251,12 @@ orders {
                     quantity
                     price
                     total
+                    variant {
+                        option_id
+                        name_ar
+                        name_fr
+                        price
+                    }
                     groups [
                         {
                             group_id
@@ -245,22 +281,45 @@ users_transactions {
         store_id
         transaction_number
         type                  // "order_payment" | "refund" |"deduction" | "withdraw"
-        payment_type = // "wallet_balance" | "{payment_name}"
+        payment_type          // "cash_payment" | "wallet_balance" | "{payment_name}"
         payment_code
-        credit_before // null if (type = "order_payment" and order_payment_type != "wallet_balance")
-        credit_after // null if (type = "order_payment" and order_payment_type != "wallet_balance")
+        payment_image
         summary_section {
+            address {
+                city
+                lat
+                lng
+            }
+            store {
+                lat
+                lng
+            }
+            estimated_prep_time
             subtotal
             delivery_fee
             service_fee
+            promotion_code
             discount
+            deduction
+            total
+            notes
         }
+        credit_before // null if (type = "order_payment" and order_payment_type != "wallet_balance")
+        credit_after // null if (type = "order_payment" and order_payment_type != "wallet_balance")
         amount
         order_id
-        status                  // "pending" | "completed" | "failed" | "expired"
+        status                  // "pending" | "completed" | "failed"
         created_at
     }
-    //
+}
+
+idempotency_keys {
+    idempotency_key {
+        uid
+        order_id
+        result // the exact value pushOrder returned/replays, e.g. {order_id}
+        created_at
+    }
 }
 
 client_transactions {
@@ -269,6 +328,7 @@ client_transactions {
         transactioner_type // "store" | "delivery"
         transactioner_id
         type                  // "order_payment" "withdraw" | "deduction" | "refund"
+        phone // not null if is "withdraw"
         credit_before
         credit_after
         amount
@@ -281,15 +341,18 @@ reports {
     report_id {
         created_at
         updated_at
-        report_type // "user_store", "user_delivery", "delivery_store", "delivery_user", "store_delivery", "system_user", "system_delivery"
+        report_type // "user_store", "user_delivery", "user_order", "delivery_store", "delivery_user", "store_delivery", "system_user", "system_delivery"
+        // user_system: a user disputing something the system itself did (an unrecognized transaction, a deduction they don't understand) - not a store/delivery/other-user complaint
         reported
         reporter
+        city_id
         status // "pending" | "processing" | "completed"
         action // "blocking" | "none" | "deduction"
         transaction_id // not null if action = "deduction"
+        order_id
         priority
         admin_by
-        message
+        messages
         images []
     }
 }
@@ -297,23 +360,19 @@ reports {
 payment_types {
     payment_id {
         name
+        name_ar
         image
         cities []
         active
     }
 }
 
-areas {
-    area_id {
-        active
-        boundary []
-        name
-    }
-}
-
 cities {
     city_id {
-        city
+        city_code  // string
+        cmd_counter
+        trs_counter
+        name
         service_fee
         delivery_fee
         km_fee
@@ -324,11 +383,13 @@ cities {
         advertisement_price {
         "home":   { view_price: 10, click_price: 50 },
         "search": { view_price: 5,  click_price: 30 },
+        "store_top10":  { view_price: 3,  click_price: 20 }
+        "store":  { view_price: 3,  click_price: 20 }
         "carts_list":   { view_price: 10, click_price: 50 },
         "store_daitails":   { view_price: 10, click_price: 50 },
         "orders_list":   { view_price: 10, click_price: 50 },
         "live_order":   { view_price: 10, click_price: 50 },
-        "histories_list":   { view_price: 10, click_price: 50 }
+        "histories_list":   { view_price: 10, click_price: 50 },
         }
         
     }
@@ -342,7 +403,7 @@ stores_analytics {
         total_canceled
         last_update
         yearly (subcollection) {
-            year {
+            year // "YYYY" {
                 year
                 total_orders
                 completed_orders
@@ -351,7 +412,7 @@ stores_analytics {
             }
         }
         monthly (subcollection) {
-                month {
+                month // "YYYY-MM" {
                     month
                     total_orders
                     completed_orders
@@ -360,14 +421,14 @@ stores_analytics {
                 }
             }
         daily (subcollection) {
-            day {
+            day // "YYYY-MM-DD" {
                 day
                 total_orders
                 completed_orders
                 total_canceled
                 total_revenue
                 hours {
-                    "{hour}"= trend_score
+                    "{hour}"= order count
                 }
             }
         }
@@ -376,44 +437,36 @@ stores_analytics {
 
 platform_analytics {
     global {
+        platform_earning
         total_orders
         total_canceled
         completed_orders
         total_revenue
-        yearly (subcollection) {
+        yearly // "YYYY" (subcollection) {
             year {
                 year
                 total_orders
                 total_revenue
                 completed_orders
                 total_canceled
-                active_users
-                active_delivery
-                active_stores
             }
         }
         monthly (subcollection) {
-            month {
+            month // "YYYY-MM" {
                 month
                 total_orders
                 completed_orders
                 total_canceled
                 total_revenue
-                active_users
-                active_delivery
-                active_stores
             }
         }
         daily (subcollection) {
-            day {
+            day // "YYYY-MM-DD" {
                 day
                 total_orders
                 completed_orders
                 total_canceled
                 total_revenue
-                active_users
-                active_delivery
-                active_stores
             }
         }
     }
@@ -425,7 +478,7 @@ conversations {
         participants: [uidA, uidB]
         last_read: { uidA: <ts>, uidB: <ts> }
         order_id // not null if is order conversation
-        status            // "open" | "resolved" | "closed"
+        status            // "open" | "closed" 
         category          // "order_issue" | "payment" | "delivery" | "call_admin"
         created_at
         messages (subcollection) {
@@ -446,6 +499,8 @@ promotions {
         type              // "percentage" | "free_delivery"
         value             // 20 (for 20% )
         active
+        budget
+        spend
         start_date
         end_date
         usage_limit
@@ -458,10 +513,6 @@ promotions {
             stores: []
             all: boolean
         }
-        created_by
-        description_ar
-        description_fr
-        image
     }
 }
 
@@ -476,7 +527,7 @@ user_promotions {
     {user_id}_{promotion_code} {
         user_id
         promotion_id
-        used_count
+        usage_count
     }
 }
 
@@ -486,7 +537,6 @@ ad_users {
         phone
         email
         active
-        created_by
         created_at
     }
 }
@@ -510,7 +560,6 @@ advertisers {
                 role  "owner" | "staff"
                 name
                 phone
-                added_by
                 added_at
                 status          // "active" | "removed"
             }
@@ -535,10 +584,10 @@ campaigns {
         monthly_budget_limit
         spent_month
         spent_month_date     // lazy monthly reset (compare to this month)
-        daily_frequency_cap
+        dailyfrequency_cap
 
         // ── targeting ──
-        cities []            // city_ids this campaign runs in
+        cities []            // city_name this campaign runs in
         start_date
         end_date
 
@@ -556,6 +605,7 @@ ads {
         // ── creative (what the user sees) ──
         title_fr, title_ar
         subtitle_fr, subtitle_ar
+        files_type  "image" | "video"
         files []             // image(s) — URLs, not bytes
         action_type          // "store" | "url" | ...
         action_value         // store_id, link, etc. (what a tap opens)
@@ -568,8 +618,13 @@ ads {
         // ── state ──
         active
         approved             // admin vetted the creative content
-        approved_by
         created_at
+        ad_analytics (subcollection) {
+            2026-09-03 {
+                views
+                clicks
+            }
+        }
     }
 }
 
@@ -581,7 +636,7 @@ advertiser_transactions {
         balance_before
         balance_after
         ad_id
-        payment_method
+        payment_type
         status
         created_at
     }
@@ -592,6 +647,9 @@ system {
         android_version
         ios_version
     }
+    server_time_probe {
+        t // FieldValue.serverTimestamp() - written+immediately read back by any client that needs the real backend clock (no direct "server now" read on the client SDK); shared/overwritten by every caller, not one doc per view. See owner_store_detail_page.dart _fetchServerTime.
+    }
 }
 
 admins {
@@ -599,7 +657,8 @@ admins {
         name
         phone
         email
-        role: "super | ops | finance"
+        is_online
+        role: "super" | "ops" | "finance"
         cities []          // city_ids this admin has access to; empty/absent = all cities
         permissions: {
             "manage_users": true
@@ -611,5 +670,22 @@ admins {
         }
         active: true
         created_at
+    }
+}
+
+admin_logs {
+    log_id {
+        admin_id            // WHO did it
+        action              // WHAT they did: "store_activated", "user_blocked",
+                            //   "refund_issued", "payout_processed", "ad_approved"
+        target_type         // what kind of thing: "store", "user", "order", ...
+        target_id           // WHICH specific thing
+        details {           // relevant context
+            before          // old value (e.g. active: false)
+            after           // new value (e.g. active: true)
+            reason          // if applicable
+            amount          // for financial actions
+        }
+        created_at          // WHEN
     }
 }

@@ -41,6 +41,7 @@ class _CartListPageState extends State<CartListPage> {
       .collection('users')
       .doc(widget.uid)
       .collection('carts')
+      .where('waiting_payment', isEqualTo: false)
       .snapshots();
 
   @override
@@ -49,28 +50,14 @@ class _CartListPageState extends State<CartListPage> {
     _loadAd();
   }
 
-  @override
-  void dispose() {
-    AdService.instance.flush();
-    super.dispose();
-  }
-
-  Future<void> _loadAd() async {
-    try {
-      final userDoc =
-          await _firestore.collection('users').doc(widget.uid).get();
-      final city =
-          (userDoc.data()?['address'] as Map<String, dynamic>?)?['city']
-              as String?;
-      if (city == null || city.isEmpty) return;
-      await AdService.instance.refresh(city);
-      final ad = AdService.instance.nextAdFor('carts_list');
-      if (ad != null) AdService.instance.recordView(ad, 'carts_list');
-      AdService.instance.startAutoFlush();
-      if (mounted) setState(() => _ad = ad);
-    } catch (_) {
-      // Ad slot just stays empty - not worth failing the page over.
-    }
+  // No dispose-time AdService.flush()/refresh() here - HomeShell owns the
+  // background refresh/flush timers for the whole session (see
+  // home_shell.dart), so every ad-showing page just reads whatever's
+  // already cached instead of managing that lifecycle itself.
+  void _loadAd() {
+    final ad = AdService.instance.nextAdFor('carts_list');
+    if (ad != null) AdService.instance.recordView(ad, 'carts_list');
+    if (mounted) setState(() => _ad = ad);
   }
 
   void _handleAdTap(CachedAd ad) {
@@ -90,13 +77,16 @@ class _CartListPageState extends State<CartListPage> {
           stream: _cartsStream,
           builder: (context, snapshot) {
             final carts = (snapshot.data?.docs ?? [])
-                .where((d) => ((d.data()['lines'] as Map?)?.isNotEmpty ?? false))
+                .where(
+                    (d) => ((d.data()['lines'] as Map?)?.isNotEmpty ?? false))
                 .toList();
 
             return Column(
               children: [
                 _buildAppBar(carts),
-                Expanded(child: SafeArea(top: false, child: _buildBody(snapshot, carts))),
+                Expanded(
+                    child: SafeArea(
+                        top: false, child: _buildBody(snapshot, carts))),
               ],
             );
           },
@@ -156,28 +146,7 @@ class _CartListPageState extends State<CartListPage> {
               ],
             ),
           ),
-          SizedBox(
-            width: 38,
-            child: carts.isEmpty
-                ? null
-                : InkWell(
-                    borderRadius: BorderRadius.circular(19),
-                    onTap: () => _deleteAllCarts(carts),
-                    child: Container(
-                      width: 38,
-                      height: 38,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.22),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.delete_outline_rounded,
-                        size: 18,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-          ),
+          const SizedBox(width: 38),
         ],
       ),
     );
@@ -319,14 +288,14 @@ class _CartListPageState extends State<CartListPage> {
             ? storeNameFr
             : TranslationHelper.get('unknown_store'));
     final storeImage = data['store_image'] as String? ?? '';
-    final waitingPayment = data['waiting_payment'] == true;
 
     final lines = StoreCartService.linesFrom(data);
-    final totalQuantity =
-        lines.fold<int>(0, (acc, l) => acc + l.quantity);
-    final totalPrice =
-        lines.fold<double>(0, (acc, l) => acc + l.lineTotal);
+    final totalQuantity = lines.fold<int>(0, (acc, l) => acc + l.quantity);
+    final totalPrice = lines.fold<double>(0, (acc, l) => acc + l.lineTotal);
 
+    // `_cartsStream` already filters to `waiting_payment == false` - a
+    // cart waiting on payment surfaces on OrdersListPage instead, so this
+    // card never needs to render that state.
     return Dismissible(
       key: ValueKey(cart.id),
       direction: DismissDirection.endToStart,
@@ -346,7 +315,8 @@ class _CartListPageState extends State<CartListPage> {
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (context) => CartPage(widget.language, widget.uid, storeId),
+            builder: (context) =>
+                CartPage(widget.language, widget.uid, storeId),
           ),
         ),
         child: Container(
@@ -375,8 +345,7 @@ class _CartListPageState extends State<CartListPage> {
                           fit: BoxFit.cover,
                           placeholder: (c, u) =>
                               Container(color: Colors.grey[200]),
-                          errorWidget: (c, u, e) =>
-                              _buildPlaceholderImage(),
+                          errorWidget: (c, u, e) => _buildPlaceholderImage(),
                         )
                       : _buildPlaceholderImage(),
                 ),
@@ -397,35 +366,17 @@ class _CartListPageState extends State<CartListPage> {
                       ),
                     ),
                     const SizedBox(height: 4),
-                    if (waitingPayment)
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.hourglass_top,
-                              size: 13, color: Color(0xFFFF9800)),
-                          const SizedBox(width: 4),
-                          Text(
-                            TranslationHelper.get('waiting_payment_title'),
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFFFF9800),
-                            ),
-                          ),
-                        ],
-                      )
-                    else
-                      Text(
-                        TranslationHelper.get(
-                            totalQuantity == 1
-                                ? 'cart_item_count_one'
-                                : 'cart_item_count_other',
-                            {'count': totalQuantity}),
-                        style: const TextStyle(
-                          fontSize: 13,
-                          color: Color(0xFF9AA1AC),
-                        ),
+                    Text(
+                      TranslationHelper.get(
+                          totalQuantity == 1
+                              ? 'cart_item_count_one'
+                              : 'cart_item_count_other',
+                          {'count': totalQuantity}),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFF9AA1AC),
                       ),
+                    ),
                     const SizedBox(height: 4),
                     Text(
                       '${totalPrice.toStringAsFixed(0)} ${TranslationHelper.get('currency_unit')}',
@@ -468,24 +419,13 @@ class _CartListPageState extends State<CartListPage> {
     );
   }
 
-  Future<bool> _confirmDelete() =>
-      _confirmDeleteDialog('confirm_delete_cart', 'confirm_delete_cart_message');
+  Future<bool> _confirmDelete() => _confirmDeleteDialog(
+      'confirm_delete_cart', 'confirm_delete_cart_message');
 
   Future<void> _deleteFromCard(
       QueryDocumentSnapshot<Map<String, dynamic>> cart) async {
+    if (cart.data()['waiting_payment'] == true) return;
     if (await _confirmDelete()) await cart.reference.delete();
-  }
-
-  Future<void> _deleteAllCarts(
-      List<QueryDocumentSnapshot<Map<String, dynamic>>> carts) async {
-    final confirmed = await _confirmDeleteDialog(
-        'confirm_delete_all_carts', 'confirm_delete_all_carts_message');
-    if (!confirmed) return;
-    final batch = _firestore.batch();
-    for (final cart in carts) {
-      batch.delete(cart.reference);
-    }
-    await batch.commit();
   }
 
   Future<bool> _confirmDeleteDialog(String titleKey, String messageKey) async {

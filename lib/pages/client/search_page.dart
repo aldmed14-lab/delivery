@@ -63,14 +63,13 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
     await _loadRecentSearches();
     await _loadUserAndCity();
     await _fetchTrendingStores();
-    if (cityName != null) {
-      await AdService.instance.refresh(cityName!);
-      final ad = AdService.instance.nextAdFor('search');
-      if (ad != null) AdService.instance.recordView(ad, 'search');
-      AdService.instance.startAutoFlush();
-      AdService.instance.startAutoRefresh();
-      if (mounted) setState(() => _searchAd = ad);
-    }
+    // No refresh()/startAutoFlush()/startAutoRefresh() here - HomeShell
+    // already keeps the shared ad cache refreshed and those timers running
+    // for the whole session (see home_shell.dart); this just reads
+    // whatever's cached.
+    final ad = AdService.instance.nextAdFor('search');
+    if (ad != null) AdService.instance.recordView(ad, 'search');
+    if (mounted) setState(() => _searchAd = ad);
   }
 
   Future<void> _loadUserAndCity() async {
@@ -94,7 +93,8 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
   void dispose() {
     _searchController.dispose();
     disposeAlert();
-    AdService.instance.flush();
+    // No AdService.flush() here - HomeShell owns the background flush
+    // timer for the whole session (see home_shell.dart).
     super.dispose();
   }
 
@@ -719,32 +719,51 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
       );
     }
 
-    return GridView.builder(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-      gridDelegate: storeGridDelegate,
-      itemCount: _searchResults.length,
-      itemBuilder: (context, index) {
-        final store = _searchResults[index];
-        final String name = store['name_${widget.language}'] ?? 'Sans nom';
-        final String isOpen = store['status'] ?? "close";
-        final String imageUrl =
-            store['image'] ?? 'https://via.placeholder.com/150';
-        final int rateNumbers = store['rate_numbers'] ?? 0;
-        final double rating =
-            (rateNumbers <= 100) ? 0 : (store['rate'] ?? 0).toDouble();
-        final deliveryMinutes =
-            (store['estimated_delivery_time'] as num?)?.toInt();
+    return Column(
+      children: [
+        // Shown once results actually land, not while the results skeleton
+        // is up - a search that turns out empty already falls through to
+        // the "no results" branch above instead of reaching here at all.
+        if (_searchAd != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: SponsoredAdCard(
+              ad: _searchAd!,
+              language: widget.language,
+              onTap: () => _handleAdTap(_searchAd!),
+            ),
+          ),
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            gridDelegate: storeGridDelegate,
+            itemCount: _searchResults.length,
+            itemBuilder: (context, index) {
+              final store = _searchResults[index];
+              final String name =
+                  store['name_${widget.language}'] ?? 'Sans nom';
+              final String isOpen = store['status'] ?? "close";
+              final String imageUrl =
+                  store['image'] ?? 'https://via.placeholder.com/150';
+              final int rateNumbers = store['rate_numbers'] ?? 0;
+              final double rating =
+                  (rateNumbers <= 100) ? 0 : (store['rate'] ?? 0).toDouble();
+              final deliveryMinutes =
+                  (store['estimated_delivery_time'] as num?)?.toInt();
 
-        return StoreGridCard(
-          name: name,
-          isOpen: isOpen,
-          imageUrl: imageUrl,
-          rateNumbers: rateNumbers,
-          rating: rating,
-          deliveryMinutes: deliveryMinutes,
-          onTap: () => _openStore(store),
-        );
-      },
+              return StoreGridCard(
+                name: name,
+                isOpen: isOpen,
+                imageUrl: imageUrl,
+                rateNumbers: rateNumbers,
+                rating: rating,
+                deliveryMinutes: deliveryMinutes,
+                onTap: () => _openStore(store),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 

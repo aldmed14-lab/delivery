@@ -13,8 +13,12 @@ import 'package:flutter_application_1/widgets/alert_card.dart';
 import 'package:flutter_application_1/widgets/sponsored_ad_card.dart';
 
 /// Past (finished) orders, grouped by month, from the top-level `orders`
-/// collection (`lib/map.txt`) filtered to `order_status` "completed" or
-/// "cancelled" - orders still in progress live on [OrdersListPage] instead.
+/// collection (`lib/map.txt`) filtered to `order_end: true` - orders still
+/// in progress live on [OrdersListPage] instead. `order_status` itself
+/// only ever reaches "placed" | "accepted" | "preparing" | "ready" |
+/// "cancelled" - a delivered order stays at "ready" and is told apart from
+/// one still in progress purely by `order_end`, not by its own status
+/// value.
 class OrderHistoryListPage extends StatefulWidget {
   final String language;
   const OrderHistoryListPage(this.language, {super.key});
@@ -25,8 +29,6 @@ class OrderHistoryListPage extends StatefulWidget {
 
 class _OrderHistoryListPageState extends State<OrderHistoryListPage>
     with AlertCardMixin {
-  static const _historyStatuses = ['completed', 'cancelled'];
-
   final _firestore = FirebaseFirestore.instance;
   final _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
   CachedAd? _ad;
@@ -42,15 +44,15 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
   final Set<String> _reorderingStoreIds = {};
 
   // Cached per store so every order card for the same store doesn't each
-  // re-fetch it.
-  final Map<String, bool> _canReorderCache = {};
+  // re-fetch it. Caches the Future itself, not just its resolved value -
+  // an async method returns a *new* Future object on every call even on a
+  // resolved-value cache hit, which would still reset the FutureBuilder at
+  // every call site on each rebuild (e.g. from pagination's setState).
+  final Map<String, Future<bool>> _canReorderFutures = {};
 
-  Future<bool> _canReorder(String storeId) async {
-    final cached = _canReorderCache[storeId];
-    if (cached != null) return cached;
-    final canReorder = await OrderReorderService.canReorder(_uid, storeId);
-    _canReorderCache[storeId] = canReorder;
-    return canReorder;
+  Future<bool> _canReorder(String storeId) {
+    return _canReorderFutures.putIfAbsent(
+        storeId, () => OrderReorderService.canReorder(_uid, storeId));
   }
 
   bool get _isArabic => widget.language == 'ar';
@@ -60,7 +62,7 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
   Query<Map<String, dynamic>> get _baseQuery => _firestore
       .collection('orders')
       .where('user_id', isEqualTo: _uid)
-      .where('order_status', whereIn: _historyStatuses)
+      .where('order_end', isEqualTo: true)
       .orderBy('created_at', descending: true);
 
   final _scrollController = ScrollController();
@@ -84,7 +86,8 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     disposeAlert();
-    AdService.instance.flush();
+    // No AdService.flush() here - HomeShell owns the background flush
+    // timer for the whole session (see home_shell.dart).
     super.dispose();
   }
 
@@ -138,21 +141,13 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
     }
   }
 
-  Future<void> _loadAd() async {
-    try {
-      final userDoc = await _firestore.collection('users').doc(_uid).get();
-      final city =
-          (userDoc.data()?['address'] as Map<String, dynamic>?)?['city']
-              as String?;
-      if (city == null || city.isEmpty) return;
-      await AdService.instance.refresh(city);
-      final ad = AdService.instance.nextAdFor('histories_list');
-      if (ad != null) AdService.instance.recordView(ad, 'histories_list');
-      AdService.instance.startAutoFlush();
-      if (mounted) setState(() => _ad = ad);
-    } catch (_) {
-      // Ad slot just stays empty - not worth failing the page over.
-    }
+  // No refresh()/startAutoFlush() here - HomeShell already keeps the
+  // shared ad cache refreshed and the flush timer running for the whole
+  // session (see home_shell.dart); this just reads whatever's cached.
+  void _loadAd() {
+    final ad = AdService.instance.nextAdFor('histories_list');
+    if (ad != null) AdService.instance.recordView(ad, 'histories_list');
+    if (mounted) setState(() => _ad = ad);
   }
 
   void _handleAdTap(CachedAd ad) {
@@ -438,7 +433,7 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
             ? storeNameFr
             : TranslationHelper.get('unknown_store'));
     final storeImage = data['store_image'] as String? ?? '';
-    final status = data['order_status'] as String? ?? 'completed';
+    final status = data['order_status'] as String? ?? 'ready';
     final total = (data['total'] as num?)?.toDouble() ?? 0;
     final createdAt = (data['created_at'] as Timestamp?)?.toDate();
     final storeId = data['store_id'] as String? ?? '';
@@ -453,8 +448,7 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
 
     final linesMap = (data['lines'] as Map?) ?? {};
     final itemCount = linesMap.values.fold<int>(0, (acc, line) {
-      final quantity =
-          ((line as Map)['quantity'] as num?)?.toInt() ?? 0;
+      final quantity = ((line as Map)['quantity'] as num?)?.toInt() ?? 0;
       return acc + quantity;
     });
 
@@ -618,8 +612,8 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
                   isBlockedBySameStore ? const Color(0xFFB4B9C2) : null,
               elevation: 0,
               padding: const EdgeInsets.symmetric(vertical: 11),
-              shape:
-                  RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
             ),
             child: isReordering
                 ? const SizedBox(
@@ -627,12 +621,14 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
                     height: 16,
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFB8631A)),
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(Color(0xFFB8631A)),
                     ),
                   )
                 : Text(
                     TranslationHelper.get('reorder_button'),
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w800),
                   ),
           ),
         ),
@@ -697,20 +693,25 @@ class _OrderHistoryListPageState extends State<OrderHistoryListPage>
   }
 
   Future<void> _doReorder(String storeId, Map<String, dynamic> data) async {
-    _canReorderCache.remove(storeId);
-    final result = await OrderReorderService.reorder(uid: _uid, orderData: data);
+    _canReorderFutures.remove(storeId);
+    final result =
+        await OrderReorderService.reorder(uid: _uid, orderData: data);
     switch (result.outcome) {
       case ReorderOutcome.storeClosed:
-        showAlert(TranslationHelper.get('reorder_store_inactive'), isError: true);
+        showAlert(TranslationHelper.get('reorder_store_inactive'),
+            isError: true);
         break;
       case ReorderOutcome.differentCity:
-        showAlert(TranslationHelper.get('reorder_different_city'), isError: true);
+        showAlert(TranslationHelper.get('reorder_different_city'),
+            isError: true);
         break;
       case ReorderOutcome.waitingPayment:
-        showAlert(TranslationHelper.get('reorder_waiting_payment'), isError: true);
+        showAlert(TranslationHelper.get('reorder_waiting_payment'),
+            isError: true);
         break;
       case ReorderOutcome.allUnavailable:
-        showAlert(TranslationHelper.get('reorder_all_unavailable'), isError: true);
+        showAlert(TranslationHelper.get('reorder_all_unavailable'),
+            isError: true);
         break;
       case ReorderOutcome.partial:
         _openCartPage(

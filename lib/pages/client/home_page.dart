@@ -152,11 +152,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     name = data?['name'] ?? '';
     if (mounted) setState(() {});
-    UserProfileCache.instance.update(
-      name: data?['name'] as String?,
-      phone: data?['phone'] as String?,
-      role: data?['role'] as String?,
-    );
+    // Only overwrites the cache on an actual successful read - on a
+    // transient fetch failure `data` is null, and blindly calling update()
+    // would wipe out whatever the cache already had (e.g. from an earlier
+    // successful load) to blank name/phone/role instead of just leaving it.
+    if (data != null) {
+      UserProfileCache.instance.update(
+        name: data['name'] as String?,
+        phone: data['phone'] as String?,
+        role: data['role'] as String?,
+      );
+    }
 
     await _checkUserLocation(data?['address'] as Map<String, dynamic>?);
   }
@@ -432,10 +438,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    // Not stopping/flushing AdService here - HomeShell owns that timer's
+    // lifetime now (see home_shell.dart), since this page's own dispose
+    // only fires when the whole shell is torn down anyway (its State stays
+    // alive across tab switches in the shell's IndexedStack), so stopping
+    // it here and starting it there was two places doing the same job.
     WidgetsBinding.instance.removeObserver(this);
-    AdService.instance.stopAutoFlush();
-    AdService.instance.stopAutoRefresh();
-    AdService.instance.flush();
     _scrollController.dispose();
     _connectionSub?.cancel();
     super.dispose();
@@ -470,8 +478,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await adsRefreshFuture;
     final ad = AdService.instance.nextAdFor('home');
     if (ad != null) AdService.instance.recordView(ad, 'home');
-    AdService.instance.startAutoFlush();
-    AdService.instance.startAutoRefresh();
+    // Not starting the flush/refresh timers here - HomeShell already
+    // started them once for the whole session (see home_shell.dart).
 
     if (!mounted || requestId != _bannerAdsRequestId) return;
     setState(() {
@@ -566,7 +574,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> refreshStores() async {
-    await fetchTrendingStores();
+    // Fired together - fetchTrendingStores' own Firestore query doesn't
+    // depend on the ads/banner refresh (or vice versa), so there's no
+    // reason to make the pull-to-refresh gesture wait for both in
+    // sequence. _loadBannerAndAds still respects AdService's own staleness
+    // window, so this can't spam Firestore reads on a rapid double-pull.
+    final city = cityName;
+    await Future.wait([
+      fetchTrendingStores(),
+      if (city != null) _loadBannerAndAds(city),
+    ]);
   }
 
   @override

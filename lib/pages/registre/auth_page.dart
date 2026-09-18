@@ -41,6 +41,12 @@ class _AuthPageState extends State<AuthPage>
   bool _hasInternetConnection = true;
   StreamSubscription<bool>? _connectionSub;
 
+  /// True from the moment "Se connecter"/"S'inscrire" is tapped (sending
+  /// the OTP) through verifying the entered code - covers both network
+  /// calls (sendOtp and verifyOtp), not just whichever one is in flight
+  /// right now, so the page stays blocked across the whole flow.
+  bool get _isBusy => _isLoading || _isVerifyingCode;
+
   @override
   void initState() {
     super.initState();
@@ -585,7 +591,7 @@ class _AuthPageState extends State<AuthPage>
       return;
     }
 
-    _isVerifyingCode = true;
+    setState(() => _isVerifyingCode = true);
     try {
       final result =
           await FirebaseFunctions.instance.httpsCallable('verifyOtp').call(
@@ -608,7 +614,11 @@ class _AuthPageState extends State<AuthPage>
             isConnectivityError(e) ? 'no_internet' : 'Invalid'));
       }
     } finally {
-      _isVerifyingCode = false;
+      if (mounted) {
+        setState(() => _isVerifyingCode = false);
+      } else {
+        _isVerifyingCode = false;
+      }
     }
   }
 
@@ -635,7 +645,7 @@ class _AuthPageState extends State<AuthPage>
             'active': true,
             'blocinfo': 0,
             'fmc': fcmToken,
-            'credit': 0,
+            'wallet_balance': 0,
           });
         }
       }
@@ -667,17 +677,44 @@ class _AuthPageState extends State<AuthPage>
     return Scaffold(
       body: Stack(
         children: [
-          SizedBox(
-            width: MediaQuery.of(context).size.width,
-            height: MediaQuery.of(context).size.height,
-            child: Image.asset(
-              'assets/background1.png',
-              fit: BoxFit.fill,
-              width: double.infinity,
-              height: double.infinity,
+          // Blocks every tap on the page - phone/name fields, the
+          // sign-in/sign-up switch, the submit button - the moment sendOtp
+          // or verifyOtp is in flight, until it actually resolves (success
+          // or error), not just the submit button itself.
+          AbsorbPointer(
+            absorbing: _isBusy,
+            child: Stack(
+              children: [
+                SizedBox(
+                  width: MediaQuery.of(context).size.width,
+                  height: MediaQuery.of(context).size.height,
+                  child: Image.asset(
+                    'assets/background1.png',
+                    fit: BoxFit.fill,
+                    width: double.infinity,
+                    height: double.infinity,
+                  ),
+                ),
+                _buildAuthCard(),
+              ],
             ),
           ),
-          SafeArea(
+          if (_isBusy)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black.withValues(alpha: 0.15),
+                child: const Center(
+                  child: CircularProgressIndicator(color: Color(0xFFFF9800)),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAuthCard() {
+    return SafeArea(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
               child: Align(
@@ -1071,10 +1108,7 @@ class _AuthPageState extends State<AuthPage>
                 ),
               ),
             ),
-          ),
-        ],
-      ),
-    );
+          );
   }
 
   Future<void> _startPhoneAuth1() async {

@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/pages/client/push_order_page.dart';
 import 'package:flutter_application_1/pages/client/store_details_page.dart';
+import 'package:flutter_application_1/utils/order_reorder_service.dart';
 import 'package:flutter_application_1/utils/store_cart_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
@@ -43,7 +44,19 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
   // to ConnectionState.waiting when it sees a "new" Stream instance, which
   // a getter would recreate on every setState in the whole page.
   late final Stream<DocumentSnapshot<Map<String, dynamic>>> _storeStream =
-      FirebaseFirestore.instance.collection('stores').doc(widget.storeId).snapshots();
+      FirebaseFirestore.instance
+          .collection('stores')
+          .doc(widget.storeId)
+          .snapshots();
+
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _cartStream =
+      StoreCartService.watch(widget.uid, widget.storeId);
+
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _userStream =
+      FirebaseFirestore.instance
+          .collection('users')
+          .doc(widget.uid)
+          .snapshots();
 
   @override
   void initState() {
@@ -53,6 +66,39 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         showAlert(message, isError: widget.initialMessageIsError);
       });
+    }
+    _pruneUnavailableLines();
+  }
+
+  /// A store owner can delete/deactivate an item - or just change its (or
+  /// one of its group options') price - after it's already sitting in
+  /// someone's cart. Nothing used to catch either: only reorder
+  /// re-validated against live item/group data. Checked once whenever the
+  /// cart page opens; `_cartStream` picks up both the removal and the
+  /// price rewrite live, so there's nothing else to refresh here.
+  Future<void> _pruneUnavailableLines() async {
+    final result =
+        await StoreCartService.syncWithCatalog(widget.uid, widget.storeId);
+    if (!mounted) return;
+    if (result.removed > 0) {
+      showAlert(
+        TranslationHelper.get(
+          result.removed == 1
+              ? 'cart_items_removed_one'
+              : 'cart_items_removed_other',
+          {'count': result.removed},
+        ),
+        isError: true,
+      );
+    } else if (result.updated > 0) {
+      showAlert(
+        TranslationHelper.get(
+          result.updated == 1
+              ? 'cart_prices_updated_one'
+              : 'cart_prices_updated_other',
+          {'count': result.updated},
+        ),
+      );
     }
   }
 
@@ -70,7 +116,7 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
         backgroundColor: const Color(0xFFF7F8FA),
         body: SafeArea(
           child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-            stream: StoreCartService.watch(widget.uid, widget.storeId),
+            stream: _cartStream,
             builder: (context, snapshot) {
               final data = snapshot.data?.data();
               final lines = StoreCartService.linesFrom(data)
@@ -79,7 +125,7 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
 
               return Column(
                 children: [
-                  _buildAppBar(data, lines),
+                  _buildAppBar(data, lines, waitingPayment),
                   if (alertCard != null) alertCard!,
                   Expanded(
                     child: lines.isEmpty
@@ -96,7 +142,7 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
   }
 
   Widget _buildAppBar(
-      Map<String, dynamic>? data, List<CartLine> lines) {
+      Map<String, dynamic>? data, List<CartLine> lines, bool waitingPayment) {
     final storeNameAr = data?['store_name_ar'] as String? ?? '';
     final storeNameFr = data?['store_name_fr'] as String? ?? '';
     final storeName = (_isArabic ? storeNameAr : storeNameFr).isNotEmpty
@@ -152,12 +198,13 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
                             ? 'cart_item_count_one'
                             : 'cart_item_count_other',
                         {'count': itemCount}),
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
+                    style:
+                        const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
                   ),
               ],
             ),
           ),
-          if (lines.isNotEmpty)
+          if (lines.isNotEmpty && !waitingPayment)
             InkWell(
               borderRadius: BorderRadius.circular(8),
               onTap: () => _clearCart(),
@@ -234,7 +281,10 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
             children: [
               if (waitingPayment) ...[
-                _buildWaitingPaymentBanner(),
+                _buildWaitingPaymentBanner(
+                  data?['payment_code'] as String?,
+                  data?['payment_image'] as String?,
+                ),
                 const SizedBox(height: 12),
               ],
               for (final line in lines) ...[
@@ -248,16 +298,35 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
         _buildTotalBar(total),
         StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
           stream: _storeStream,
-          builder: (context, snapshot) {
-            final storeStatus = snapshot.data?.data()?['status'] as String?;
-            return _buildCheckoutBar(waitingPayment, storeStatus);
+          builder: (context, storeSnap) {
+            final storeData = storeSnap.data?.data();
+            final storeStatus = storeData?['status'] as String?;
+            final storeCity = storeData?['city'] as String?;
+            return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+              stream: _userStream,
+              builder: (context, userSnap) {
+                final userCity = (userSnap.data?.data()?['address']
+                    as Map<String, dynamic>?)?['city'] as String?;
+                // Both docs must have actually loaded and agree - a cart
+                // can outlive the user moving to a different city (or a
+                // brief moment before either doc resolves), and delivery
+                // isn't possible outside the user's current city, same
+                // rule as OrderReorderService.isStoreInUserCity.
+                final sameCity =
+                    OrderReorderService.citiesMatch(storeCity, userCity);
+                final citiesLoaded =
+                    storeSnap.data != null && userSnap.data != null;
+                return _buildCheckoutBar(waitingPayment, storeStatus,
+                    citiesLoaded: citiesLoaded, sameCity: sameCity);
+              },
+            );
           },
         ),
       ],
     );
   }
 
-  Widget _buildWaitingPaymentBanner() {
+  Widget _buildWaitingPaymentBanner(String? paymentCode, String? paymentImage) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -265,30 +334,94 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: const Color(0xFFFFD9A8)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.hourglass_top, color: Color(0xFFFF9800), size: 20),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  TranslationHelper.get('waiting_payment_title'),
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF2E3A59),
-                  ),
+          Row(
+            children: [
+              const Icon(Icons.hourglass_top,
+                  color: Color(0xFFFF9800), size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      TranslationHelper.get('waiting_payment_title'),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF2E3A59),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      TranslationHelper.get('waiting_payment_message'),
+                      style: const TextStyle(
+                          fontSize: 11, color: Color(0xFF9AA1AC)),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  TranslationHelper.get('waiting_payment_message'),
-                  style: const TextStyle(fontSize: 11, color: Color(0xFF9AA1AC)),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
+          // Only an async provider (e.g. "test_payment") sets this on the
+          // cart - cash/wallet never leave a cart in `waiting_payment` at
+          // all, they create the order synchronously.
+          if (paymentCode != null) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  if (paymentImage != null && paymentImage.isNotEmpty) ...[
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: CachedNetworkImage(
+                        imageUrl: paymentImage,
+                        width: 32,
+                        height: 32,
+                        fit: BoxFit.cover,
+                        placeholder: (c, u) =>
+                            Container(color: Colors.grey[200]),
+                        errorWidget: (c, u, e) =>
+                            Container(color: Colors.grey[200]),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                  ],
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          TranslationHelper.get('payment_code_label'),
+                          style: const TextStyle(
+                              fontSize: 11, color: Color(0xFF9AA1AC)),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          paymentCode,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFFFF9800),
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -326,7 +459,8 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
                       imageUrl: line.image,
                       fit: BoxFit.cover,
                       placeholder: (c, u) => Container(color: Colors.grey[200]),
-                      errorWidget: (c, u, e) => Container(color: Colors.grey[200]),
+                      errorWidget: (c, u, e) =>
+                          Container(color: Colors.grey[200]),
                     )
                   : Container(color: Colors.grey[200]),
             ),
@@ -352,7 +486,8 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
                     part,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC)),
+                    style: const TextStyle(
+                        fontSize: 11.5, color: Color(0xFF9AA1AC)),
                   ),
                 ],
                 const SizedBox(height: 6),
@@ -384,7 +519,8 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
     final multiLines = <String>[];
     for (final group in line.groups) {
       final selected = (group['selected'] as List? ?? [])
-          .map((s) => (s as Map)['name_${widget.language}'] as String? ??
+          .map((s) =>
+              (s as Map)['name_${widget.language}'] as String? ??
               (s)['name_fr'] as String? ??
               '')
           .where((n) => n.isNotEmpty)
@@ -406,14 +542,16 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
     return Container(
       height: 32,
       decoration: BoxDecoration(
-        color: waitingPayment ? const Color(0xFFE1E4E9) : const Color(0xFFFF9800),
+        color:
+            waitingPayment ? const Color(0xFFE1E4E9) : const Color(0xFFFF9800),
         borderRadius: BorderRadius.circular(9),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           InkWell(
-            borderRadius: const BorderRadius.horizontal(left: Radius.circular(9)),
+            borderRadius:
+                const BorderRadius.horizontal(left: Radius.circular(9)),
             onTap: waitingPayment ? null : () => _adjustQuantity(line, -1),
             child: const SizedBox(
               width: 32,
@@ -434,7 +572,8 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
             ),
           ),
           InkWell(
-            borderRadius: const BorderRadius.horizontal(right: Radius.circular(9)),
+            borderRadius:
+                const BorderRadius.horizontal(right: Radius.circular(9)),
             onTap: waitingPayment ? null : () => _adjustQuantity(line, 1),
             child: const SizedBox(
               width: 32,
@@ -456,7 +595,9 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: waitingPayment ? const Color(0xFFE1E4E9) : const Color(0xFFFF9800),
+            color: waitingPayment
+                ? const Color(0xFFE1E4E9)
+                : const Color(0xFFFF9800),
             width: 1.4,
             style: BorderStyle.solid,
           ),
@@ -467,7 +608,9 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
             Icon(
               Icons.add_rounded,
               size: 18,
-              color: waitingPayment ? const Color(0xFFB4B9C2) : const Color(0xFFFF9800),
+              color: waitingPayment
+                  ? const Color(0xFFB4B9C2)
+                  : const Color(0xFFFF9800),
             ),
             const SizedBox(width: 6),
             Text(
@@ -475,7 +618,9 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
               style: TextStyle(
                 fontSize: 13.5,
                 fontWeight: FontWeight.w700,
-                color: waitingPayment ? const Color(0xFFB4B9C2) : const Color(0xFFFF9800),
+                color: waitingPayment
+                    ? const Color(0xFFB4B9C2)
+                    : const Color(0xFFFF9800),
               ),
             ),
           ],
@@ -512,21 +657,34 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
     );
   }
 
-  Widget _buildCheckoutBar(bool waitingPayment, String? storeStatus) {
+  Widget _buildCheckoutBar(bool waitingPayment, String? storeStatus,
+      {required bool citiesLoaded, required bool sameCity}) {
     final isClosed = storeStatus == 'close';
     final isBusy = storeStatus == 'trafic';
-    // storeStatus == null means the store doc hasn't loaded yet - fails
-    // closed (checkout stays disabled) rather than briefly allowing a tap
-    // before the real status is known.
-    final disabled = waitingPayment || isClosed || isBusy || storeStatus == null;
+    // A real (loaded) mismatch, not just "still loading" - during load
+    // citiesLoaded is false so this stays false too, keeping the button's
+    // label neutral instead of flashing "different city" before either doc
+    // has actually resolved.
+    final differentCity = citiesLoaded && !sameCity;
+    // storeStatus == null / !citiesLoaded means a doc hasn't loaded yet -
+    // fails closed (checkout stays disabled) rather than briefly allowing a
+    // tap before the real state is known.
+    final disabled = waitingPayment ||
+        differentCity ||
+        isClosed ||
+        isBusy ||
+        storeStatus == null ||
+        !citiesLoaded;
 
     final label = waitingPayment
         ? TranslationHelper.get('waiting_payment_title')
-        : isClosed
-            ? TranslationHelper.get('store_closed')
-            : isBusy
-                ? TranslationHelper.get('store_busy')
-                : TranslationHelper.get('go_to_checkout');
+        : differentCity
+            ? TranslationHelper.get('reorder_different_city')
+            : isClosed
+                ? TranslationHelper.get('store_closed')
+                : isBusy
+                    ? TranslationHelper.get('store_busy')
+                    : TranslationHelper.get('go_to_checkout');
 
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -541,7 +699,8 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
             disabledBackgroundColor: const Color(0xFFFFC98A),
             elevation: 0,
             padding: const EdgeInsets.symmetric(vertical: 15),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           ),
           child: Text(
             label,
@@ -555,7 +714,8 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
   Future<void> _adjustQuantity(CartLine line, int delta) async {
     final newQty = line.quantity + delta;
     if (newQty <= 0) {
-      await StoreCartService.removeLine(widget.uid, widget.storeId, line.lineKey);
+      await StoreCartService.removeLine(
+          widget.uid, widget.storeId, line.lineKey);
     } else {
       await StoreCartService.setLineQuantity(
           widget.uid, widget.storeId, line.lineKey, newQty);
@@ -569,8 +729,8 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => StoreDetails(widget.language, widget.storeId, widget.uid,
-            storeNameAr, storeNameFr, storeImage),
+        builder: (_) => StoreDetails(widget.language, widget.storeId,
+            widget.uid, storeNameAr, storeNameFr, storeImage),
       ),
     );
   }
@@ -579,7 +739,8 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => PushOrderPage(widget.language, widget.uid, widget.storeId),
+        builder: (_) =>
+            PushOrderPage(widget.language, widget.uid, widget.storeId),
       ),
     );
   }
