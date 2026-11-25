@@ -4,8 +4,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 
+import 'package:flutter_application_1/pages/shared/chat_page.dart';
 import 'package:flutter_application_1/utils/alert_sound.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
@@ -22,6 +23,19 @@ String? _statusFor(_OrderFilter f) => switch (f) {
       _OrderFilter.ready => 'ready',
     };
 
+/// Shared by every "open chat" tap on an owner-facing order card (this
+/// file's two boards, and store_order_history_page.dart via its `show
+/// OrderCard` import) - not private, so it isn't duplicated per file.
+/// `otherName` is left blank rather than fetched: `orders` never carries the
+/// customer's name (only `user_id`), and ChatPage already falls back to a
+/// generic title when it's empty.
+void openChatFor(BuildContext context, String language, String conversationId) {
+  Navigator.push(
+    context,
+    MaterialPageRoute(builder: (_) => ChatPage(language, conversationId, '')),
+  );
+}
+
 /// Owner's live order board - every non-ended order for this store
 /// (`order_end == false`), filterable by status, with the action that
 /// advances each one (accept/refuse a new order, start preparing, mark
@@ -36,8 +50,7 @@ class StoreOrdersPage extends StatefulWidget {
   State<StoreOrdersPage> createState() => _StoreOrdersPageState();
 }
 
-class _StoreOrdersPageState extends State<StoreOrdersPage>
-    with AlertCardMixin {
+class _StoreOrdersPageState extends State<StoreOrdersPage> with AlertCardMixin {
   final _firestore = FirebaseFirestore.instance;
 
   bool get _isArabic => widget.language == 'ar';
@@ -250,7 +263,8 @@ class _StoreOrdersPageState extends State<StoreOrdersPage>
                     color: Colors.white.withValues(alpha: 0.22),
                     shape: BoxShape.circle,
                   ),
-                  child: const Icon(Icons.search, size: 20, color: Colors.white),
+                  child:
+                      const Icon(Icons.search, size: 20, color: Colors.white),
                 ),
               ),
             ],
@@ -315,8 +329,9 @@ class _StoreOrdersPageState extends State<StoreOrdersPage>
         if (snapshot.hasError) {
           return Center(
             child: Text(
-              TranslationHelper.get(
-                  isConnectivityError(snapshot.error!) ? 'no_internet' : 'error'),
+              TranslationHelper.get(isConnectivityError(snapshot.error!)
+                  ? 'no_internet'
+                  : 'error'),
               style: const TextStyle(color: Color(0xFF9AA1AC)),
             ),
           );
@@ -327,7 +342,8 @@ class _StoreOrdersPageState extends State<StoreOrdersPage>
         final wantedStatus = _statusFor(_filter);
         final docs = snapshot.data!.docs
             .where((d) =>
-                wantedStatus == null || d.data()['order_status'] == wantedStatus)
+                wantedStatus == null ||
+                d.data()['order_status'] == wantedStatus)
             .toList();
 
         if (docs.isEmpty) {
@@ -363,7 +379,8 @@ class _StoreOrdersPageState extends State<StoreOrdersPage>
             onStartPreparing: () => _updateStatus(docs[i], 'preparing'),
             onMarkReady: () => _updateStatus(docs[i], 'ready'),
             onOpenChat: docs[i].data()['conversation_id'] != null
-                ? () => showAlert(TranslationHelper.get('chat_coming_soon'))
+                ? () => openChatFor(context, widget.language,
+                    docs[i].data()['conversation_id'] as String)
                 : null,
           ),
         );
@@ -436,7 +453,8 @@ class OrderCard extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  TranslationHelper.get('order_number_label', {'number': orderNumber}),
+                  TranslationHelper.get(
+                      'order_number_label', {'number': orderNumber}),
                   style: const TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w800,
@@ -623,10 +641,12 @@ class OrderCard extends StatelessWidget {
     }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+      decoration:
+          BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
       child: Text(
         label,
-        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: fg),
+        style:
+            TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: fg),
       ),
     );
   }
@@ -689,7 +709,8 @@ class OrderCard extends StatelessWidget {
           foregroundColor: Colors.white,
           elevation: 0,
           padding: const EdgeInsets.symmetric(vertical: 12),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
         child: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
       ),
@@ -898,7 +919,8 @@ class _OrderSearchPageState extends State<_OrderSearchPage>
         onStartPreparing: () => _updateStatus(_results[i], 'preparing'),
         onMarkReady: () => _updateStatus(_results[i], 'ready'),
         onOpenChat: _results[i].data()['conversation_id'] != null
-            ? () => showAlert(TranslationHelper.get('chat_coming_soon'))
+            ? () => openChatFor(context, widget.language,
+                _results[i].data()['conversation_id'] as String)
             : null,
       ),
     );
@@ -919,14 +941,16 @@ class _OrderSearchPageState extends State<_OrderSearchPage>
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
     }
   }
 
-  Future<void> _refuse(QueryDocumentSnapshot<Map<String, dynamic>> order) async {
+  Future<void> _refuse(
+      QueryDocumentSnapshot<Map<String, dynamic>> order) async {
     try {
       await order.reference.update({'order_end': true});
     } catch (_) {
@@ -940,7 +964,8 @@ class _OrderSearchPageState extends State<_OrderSearchPage>
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }

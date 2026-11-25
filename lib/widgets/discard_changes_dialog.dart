@@ -5,7 +5,8 @@ import 'package:flutter_application_1/utils/translation_helper.dart';
 /// (store info / work time / item edit, ...) when the owner tries to
 /// navigate away with unsaved changes. Returns true only if they chose to
 /// discard; false/null (dismissed) means stay on the page.
-Future<bool> confirmDiscardChanges(BuildContext context, {required bool isArabic}) async {
+Future<bool> confirmDiscardChanges(BuildContext context,
+    {required bool isArabic}) async {
   final result = await showDialog<bool>(
     context: context,
     builder: (context) => Directionality(
@@ -29,7 +30,8 @@ Future<bool> confirmDiscardChanges(BuildContext context, {required bool isArabic
               const SizedBox(height: 8),
               Text(
                 TranslationHelper.get('discard_changes_message'),
-                style: const TextStyle(fontSize: 13.5, color: Color(0xFF677489)),
+                style:
+                    const TextStyle(fontSize: 13.5, color: Color(0xFF677489)),
               ),
               const SizedBox(height: 20),
               Row(

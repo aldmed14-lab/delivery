@@ -1,30 +1,287 @@
-make Help Page in have 3 way to open it {
-    1: direct click in profile page in it show common question {Où est ma commande ?, problem with transaction, Frais de livraison, Demander un remboursement, Devenir livreur ou partenaire}
-    2: when open it in transaction page in it show first card have put transaction number when add it search where transaction_number and user_id if not exist show not exist return to 1 (be like direct click), if exist show reponse have amount, created_at, type, status, payment_type (if need it) and show questions in transaction_number
-    3: when click it in order_history_detail_page if order created_at < 3 days show same questions in order_number , else show his info and with notice can't report it and show common question (same as way 1)
+// ============================================================================
+// LOCATION SYSTEM - design (not built yet)
+// ============================================================================
+
+core idea {
+    two different things, never mixed:
+    1. browsing city    -> which city's stores/ads/banner the user sees. Only needs to be roughly right, must load instantly
+    2. delivery address -> the exact door the courier goes to. Must be precise, confirmed by the user, chosen per order
+    raw GPS is only ever a SUGGESTION for (2) - it is never saved as a delivery address without the user confirming the pin
+    every reference to a city is its id (cities/{city_id}); city names are for display only
+    the service area is drawn PER CITY: each city doc carries its own polygon - no separate zones/areas collection
 }
 
-when click to questions {
-    "Où est ma commande ?":  search order where user_id and order_end = false and show order_number with other button "return to questions" if not found eny order make other search where user_id, created_at < 3 days, limite 5 with "return to questions";
-    order_number: before showing the 3 sub-questions, search reports where order_id = this order && reporter = user_id && status in (pending, processing) -> if one exists, skip straight to showing its report_type + message (read-only, no new report can be filed while one is still open for this order) instead of the questions below. only once that report reaches status = completed can a new one be filed for the same order.
-    order_number: show questions {i don't get the order, missing items, problem in order, } :{
-        i don't get the order: show card to create report have message is in system have like "i don't receive the order" and other things it show if arabic setup with arabic text but when click send send it but with fr language (report_type = "user_order", reported = store_id, reporter = user_id, order_id = this order, transaction_id = order.transaction_id, city_id = order.city, status = "pending", priority = "hight", message); when click Annuler return to order_number questions
-        missing items: show card have the items (but not separed per line) with "+ 0 -" from 0 to item count when click continue must at least one item more than 0 and show card have message "i receive order but missing items : x1 item1, x3 item2 etc" when click send send it with report_type = "user_store", reported = store_id, reporter = user_id, order_id = this order, transaction_id = order.transaction_id, city_id = order.city, priority = "hight" , if Annuler rreturn to order_number questions
-        problem in order: show card have message box user write it and button for send and other for add images (report_type = "user_store", reported = store_id, reporter = user_id, order_id = this order, transaction_id = order.transaction_id, city_id = order.city, priority = "hight")
-    }
-    "problem with transaction": search transaction where user_id, created_at < 3days, limite 5, if not exist return to questions
-    transaction_number: before showing the 3 sub-questions, search reports where transaction_id = this transaction && reporter = user_id && status in (pending, processing) -> if one exists, skip straight to showing its report_type + message (read-only) instead of the questions below, same rule as order_number above.
-    transaction_number: show questions {i don't make this transaction(if type = "order_payment" or "withdraw"), why this deduction (if type = "deduction"), error in transaction}: {
-        "i don't make this transaction": show card have message box user write it and button for send (report_type = "user_system", reported = "system", reporter = user_id, transaction_id = this transaction, order_id = transaction.order_id, city_id = transaction.summary_section.address.city, status = "pending", priority = "hight")
-        "why this deduction": (the existing-report check above already covers this - if a report exists it was shown already) if none exists show questions "make report" when click it show card for make report (report_type = "user_system", reported = "system", reporter = user_id, transaction_id = this transaction, order_id = transaction.order_id, city_id = transaction.summary_section.address.city, status = "pending", priority = "hight")
-        "error in transaction": show card to report (report_type = "user_system", reported = "system", reporter = user_id, transaction_id = this transaction, order_id = transaction.order_id, city_id = transaction.summary_section.address.city, status = "pending", priority = "normal")
-    }
-    "Frais de livraison": get from city collection service_fee and delivery_fee and km_fee and rain_fee and make good text explain it
-    "Demander un remboursement": in this show text mean you need select a order or transaction have problem with it
-    "Devenir livreur ou partenaire" text have some thing like "we are very happy to join use click here to start" is link to web side will add later
+// ----------------------------------------------------------------------------
+// data
+// ----------------------------------------------------------------------------
 
+cities {
+    city_id {
+        name_ar
+        name_fr
+        polygon [ {lat, lng} ]  // the city's delivery area (replaces the `areas` collection) - a point inside it = this city
+        bbox { min_lat, max_lat, min_lng, max_lng }   // computed by the admin page from polygon on every save - never typed by hand
+        max_delivery_km         // optional: longest store -> address straight-line distance allowed in this city (absent = no limit)
+        city_code, service_fee, delivery_fee, km_fee, rain, rain_fee, cash_payment, advertisement_price { ... }   // unchanged
+        // cmd_counter / trs_counter move OUT of this doc (see counters) - so the status doc below can be listened to cheaply
+        // active / stop_reason move OUT too (see status) - EVERY "is the city paused?" check reads status/current:
+        //   pushOrder, map picker, home, and the admin pause button writes it
+        status (subcollection) {
+            current {           // tiny doc, the only thing the app listens to live
+                active          // false = service paused in this city
+                stop_reason_ar
+                stop_reason_fr
+                reopen_at       // optional timestamp -> "back at 18:00"
+            }
+        }
+        counters (subcollection) {
+            current {
+                cmd_counter     // bumped on every order - kept away from anything clients listen to
+                trs_counter
+            }
+        }
+    }
+    resolving a point -> city (same steps in the app and in pushOrder) {
+        1. keep only cities whose bbox contains the point (cheap rectangle check)
+        2. run point-in-polygon only on those (normally 0 or 1 left)
+        3. none -> outside every city
+    }
+    rule: city polygons must NOT overlap - every point belongs to at most one city {
+        the admin web page checks a new/edited polygon against every other city before saving and refuses an overlap
+        safety net if one slips through anyway: the city with the smallest polygon area wins,
+        same rule on client and server so both pick the same city; the server logs it so the admin can fix the polygons
+    }
 }
-note: for every questions show have button "return back"
-note: report_type list now covers every reason above - "user_order"/"user_store" for order-side, "user_system" for transaction-side (added to map.txt's reports.report_type enum - a user disputing something the system itself did, not a store/delivery complaint)
-note: add images button just where i say it
-note: every report created above also carries order_id and/or transaction_id and city_id (all already fields on reports in map.txt) so admin can trace it back to the source - only report_type/reported/reporter/status/priority/message were being set before
+
+system {
+    config {
+        ...existing fields
+        cities_version          // bumped automatically by the admin page on every city polygon/name change
+    }
+}
+
+users {
+    user_id {
+        default_address_id      // the address used for browsing + preselected at checkout, or "current_location" = fresh GPS on every home start
+        addresses (subcollection) {          // replaces `address` + `locations` - max 10 per user (add button hidden at 10)
+            address_id {
+                label           // "home" | "work" | "other" | custom text
+                lat
+                lng
+                geohash
+                city_id         // resolved from the point (city polygon) when saved
+                last_used_at
+                created_at
+            }
+        }
+    }
+}
+
+stores {
+    store_id {
+        city_id                 // written by the admin web page (not built yet) from day one - must match the city polygon the store's point is in
+        max_delivery_km         // optional: overrides the city's max_delivery_km for this store (absent = use the city's)
+        ...existing fields (city name kept only for display)
+    }
+}
+
+delivery {
+    user_id {
+        city_id                 // written by the admin web page (not built yet) from day one
+        ...existing fields
+    }
+}
+
+orders {
+    order_id {
+        city_id
+        delivery_address {      // full COPY of the address at order time - later edits/deletes of the saved address never change a past order
+            label, lat, lng, geohash, city_id
+        }
+        ...existing fields
+    }
+}
+
+everything else keyed by city  -> by city_id {
+    banner/{city_id}
+    payment_types.cities []     // city ids
+    campaigns.cities []         // city ids
+    promotions.applicable_to.cities []   // city ids
+    reports.city_id             // already an id
+}
+
+home feed + search: stores too far are HIDDEN {
+    too far = store -> active location distance > max_delivery_km (store's, else city's); no limit set -> nothing hidden
+    Firestore can't filter by distance -> the query stays start + city_id (+ tags) + trend, and the app drops too-far stores
+    pagination: a page can come back with stores all dropped -> keep fetching the next page until the page is full
+        or there's no more data (same 30-store cap as today), so the feed never looks empty while closer stores exist
+    a too-far store opened another way (ad, order history "reorder", shared link) -> store page opens but shows
+        "too far from your address" and ordering is blocked
+    active location changes -> recompute (a store hidden from home can appear from work, and the reverse)
+}
+
+every app page that uses the city -> active location's city_id {
+    home feed, search, store details, cart, checkout, reorder (order history), help (reports + delivery-fee answer),
+    ads (campaigns), banner
+}
+
+// ----------------------------------------------------------------------------
+// setup that must exist before release
+// ----------------------------------------------------------------------------
+
+firestore indexes {
+    stores: start + city_id + trend desc
+    stores: start + city_id + tags (array) + trend desc
+    delivery: the courier-search candidate query with city_id instead of city
+    payment_types: cities (array) + active
+    campaigns: active + cities (array) + budget
+}
+
+firestore rules {
+    users/{uid}/addresses/*      -> read/write only by that uid; max 10 enforced in the app (rules can't count docs)
+    cities/*                     -> read: everyone signed in; write: admins only
+    cities/*/status/*            -> read: everyone signed in; write: admins only
+    cities/*/counters/*          -> no client read/write at all (server only)
+    system/config                -> read: everyone; write: admins only
+}
+
+admin web page (not built yet) must {
+    save cities with polygon -> compute bbox, check no overlap, bump system/config.cities_version
+    pause/resume a city by writing cities/{id}/status/current
+    write city ids (never names) in stores, delivery, banner, payment_types, campaigns, promotions
+}
+
+// ----------------------------------------------------------------------------
+// app start (home)
+// ----------------------------------------------------------------------------
+
+home start {
+    1. instant - no network, no GPS wait {
+        read the last active location + city_id from local storage (shared_preferences) - a saved address, or the unsaved GPS location (see 3)
+        show that city's stores right away
+    }
+    2. background {
+        - load the user doc + default address -> if it differs from local storage, switch to it and update local storage
+        - listen to cities/{city_id}/status/current {
+              active = true  -> normal
+              active = false -> replace the feed with stop_reason_{lang} (+ "back at {reopen_at}" if set); header location switcher still works
+              doc missing    -> "no service right now"
+              a pause or reopen shows up live, no restart needed
+          }
+        - cities_version changed since last time -> download cities again, then re-check every saved address against the new polygons {
+              address now in a different city -> update its city_id
+              address now outside every city / its city deleted -> mark it "no longer in our delivery area" (can't be used at checkout)
+              the active address affected -> switch city / show the address picker
+          }
+        - quiet GPS check (only if permission is ALREADY granted - never pop a permission dialog on open) {
+              device in another serviced city -> banner "You seem to be in {city}. Switch?"  (never switches by itself)
+              device far (> ~1 km) from the default address in the same city -> nothing (users browse from work, order for home, etc.)
+          }
+    }
+    3. no saved address (new user) {
+        GPS -> resolve the city from the point -> browse that city right away
+        - this current location is NOT saved to Firestore (local storage only) - it's only for browsing
+        - nothing is saved until the user selects a location (address picker, map, or checkout - see checkout)
+        GPS fails / outside every city -> "Where should we deliver?" screen {
+            [Use my location] -> retry GPS
+            [Choose on map]   -> map from the GPS point if there is one, else one fixed default point in the app -> pin -> label -> SAVED
+        }
+        no "skip" - nothing works without a serviced location
+    }
+}
+
+logout {
+    clear the location in local storage (last active location + city_id + the unsaved GPS location)
+    - otherwise the next account logged in on the same phone starts on the previous user's location
+    the cached cities polygons can stay (not personal)
+}
+
+// ----------------------------------------------------------------------------
+// choosing / changing an address
+// ----------------------------------------------------------------------------
+
+address picker (header + checkout use the same sheet) {
+    list of saved addresses, most recently used first
+    [Current location] -> GPS, used for browsing only, NOT saved (same as home start 3)
+    [+ Add address] -> map + pin + label -> SAVED
+    pick one -> it becomes default_address_id, local storage updated, home switches city if needed
+    edit / delete a saved address (deleting the default one -> pick another or add one)
+}
+
+map picker {
+    city polygons + names kept in local storage; downloaded again only when system/config.cities_version changes
+    (no full cities read on every map open / GPS check)
+    pin inside an active city  -> green, shows the city name, [Confirm]
+    pin inside a paused city   -> grey, shows the city's stop reason
+    pin outside every city     -> grey, "we don't deliver here yet"
+}
+
+// ----------------------------------------------------------------------------
+// checkout
+// ----------------------------------------------------------------------------
+
+checkout {
+    shows the selected address: mini map + label, [Change] opens the address picker
+    browsing on the unsaved GPS location -> "Confirm your delivery address": map opens on the GPS point, user drags the pin
+        to the exact door (GPS is often 30-100 m off), label -> SAVED as an address + becomes default_address_id
+        - an order always goes to a saved, pin-confirmed address, never to raw GPS
+    the order gets a full copy of the address (orders.delivery_address)
+    device more than ~3 km from the delivery address -> "Ordering for another place?" confirm (catches wrong-address orders)
+    store.city_id != address.city_id -> "this store doesn't deliver to this address"
+    store -> address distance > max_delivery_km (store's, else city's) -> "this store is too far from your address"
+        (normally never reached - such stores are hidden, see home feed)
+    address marked "no longer in our delivery area" -> can't be selected, user picks another / adds one
+}
+
+pushOrder (server - the only judge) {
+    client sends: address_id only (every delivery address is saved first - see checkout)
+    server reads the address itself, then resolves the city FROM THE POINT (bbox, then point-in-polygon - see cities)
+    - polygons kept in the function's memory between calls, reloaded only when system/config.cities_version changes
+      (not every city doc read on every order)
+    - never trusts a city the client sends (a modified client could otherwise claim any city, and its fees, for any point)
+    rejects: point outside every city | city paused (status/current) | store.city_id != resolved city_id
+             | store -> address distance > max_delivery_km (store's, else city's)
+    fees from cities/{city_id}, numbering from cities/{city_id}/counters/current (inside the order transaction)
+}
+
+// ----------------------------------------------------------------------------
+// rollout - clean start (all current data is test data)
+// ----------------------------------------------------------------------------
+
+rollout {
+    no migration, no "old + new" period, no name fallbacks anywhere - the code only ever knows the new structures
+    1. wipe test data that uses the old shapes: users.address, users/{uid}/locations, areas, orders, users_transactions,
+       banner/{city_name}, and city names inside payment_types/campaigns/promotions
+    2. recreate the base data in the new shapes: cities (+ polygon, status/current, counters/current),
+       banner/{city_id}, payment_types/campaigns/promotions with city ids
+    3. ship server + app together, both reading/writing only the new structures
+    4. stores + delivery are created by the admin web page (not built yet) with city_id from the start
+       - until it exists, test stores/couriers are created by hand with that field
+}
+
+risks found while designing {
+    - counters move docs: numbering must read/write cities/{id}/counters/current in the SAME transaction that creates the order, or two orders can get the same number
+    - status listener + offline: when offline, keep showing the last known status, don't flash "no service"
+    - cities_version cache: if a polygon changes without cities_version being bumped, clients keep the old polygon - the admin page bumps it automatically on every save
+    - a deleted saved address that is still default_address_id -> treat as "no saved address" (home start 3), not a crash
+    - an address or store pointing at a deleted city -> address: "no longer in our delivery area"; store: hidden (admin must fix it)
+    - a polygon edit moving saved addresses out of / into a city -> caught by the re-check in home start 2, and by pushOrder anyway
+    - logout without clearing the location in local storage -> next account sees the previous user's location (see logout)
+    - unsaved GPS location in local storage after the user moved city: the background GPS check in home start 2 catches it
+    - overlapping city polygons (see cities rule): without it, one point could be in two cities and the app and server
+      could pick different ones, so a different fee or "paused" answer
+    - a pin drawn exactly on a city edge could resolve differently on client and server - server wins, client shows its error message
+}
+
+decisions {
+    - one polygon per city is enough (no multi-piece service areas)
+    - no door photo on addresses
+    - no one-off addresses: without a saved address, the current GPS location is used for browsing only (not saved);
+      any location the user selects is saved, and checkout always uses a saved address
+    - keep system/config.cities_version: city polygons cached on the phone, downloaded again only when it changes
+    - point -> city check is bbox first, then polygon (cities.bbox computed by the admin page)
+    - optional max_delivery_km per city, overridable per store
+    - stores beyond max_delivery_km are hidden from the home feed and search (not shown with a "too far" mark)
+    - max 10 saved addresses per user
+    - no courier pin feedback (orders.delivered_point / "update your pin?") - can be added later if wrong pins turn out to be common
+}

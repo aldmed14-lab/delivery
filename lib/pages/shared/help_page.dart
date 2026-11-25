@@ -1,12 +1,20 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:uuid/uuid.dart';
 
 import 'package:flutter_application_1/pages/client/live_order_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/pages/shared/demande_page.dart';
+import 'package:flutter_application_1/utils/cities_service.dart';
+import 'package:flutter_application_1/utils/location_service.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
+import 'package:flutter_application_1/utils/user_profile_cache.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
 /// A single tappable option in the bottom panel - either one of the
@@ -27,7 +35,8 @@ class _TypingDots extends StatefulWidget {
   State<_TypingDots> createState() => _TypingDotsState();
 }
 
-class _TypingDotsState extends State<_TypingDots> with SingleTickerProviderStateMixin {
+class _TypingDotsState extends State<_TypingDots>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1200),
@@ -63,8 +72,8 @@ class _TypingDotsState extends State<_TypingDots> with SingleTickerProviderState
             child: Container(
               width: 7,
               height: 7,
-              decoration:
-                  const BoxDecoration(color: Color(0xFF9AA1AC), shape: BoxShape.circle),
+              decoration: const BoxDecoration(
+                  color: Color(0xFF9AA1AC), shape: BoxShape.circle),
             ),
           ),
         );
@@ -99,6 +108,16 @@ class HelpPage extends StatefulWidget {
 }
 
 class _HelpPageState extends State<HelpPage> with AlertCardMixin {
+  // Every Firestore read below is chained with `.timeout(_networkTimeout)` -
+  // without it, a stuck/slow read leaves `_busy` stuck true forever (no
+  // error, no answer, and every tap after it - including on other
+  // questions - silently swallowed by the `if (_busy) return;` guards until
+  // whatever was stuck finally resolves, at which point several delayed
+  // answers can land together). A timeout turns that into a normal caught
+  // exception (already classified as a connectivity error by
+  // isConnectivityError) instead of an indefinite hang.
+  static const _networkTimeout = Duration(seconds: 12);
+
   final _firestore = FirebaseFirestore.instance;
   final _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
   final _scrollController = ScrollController();
@@ -130,7 +149,11 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
       setState(() => _busy = true);
       _showTyping();
       try {
-        final doc = await _firestore.collection('orders').doc(orderId).get();
+        final doc = await _firestore
+            .collection('orders')
+            .doc(orderId)
+            .get()
+            .timeout(_networkTimeout);
         if (!mounted) return;
         final data = doc.data();
         if (data == null) {
@@ -192,8 +215,10 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
               _onTransactionProblem),
           _Chip(TranslationHelper.get('help_q_delivery_fee'), _onDeliveryFee),
           _Chip(TranslationHelper.get('help_q_refund'), _onRefund),
-          _Chip(TranslationHelper.get('help_q_become_partner'),
-              _onBecomePartner),
+          _Chip(TranslationHelper.get('help_q_become_delivery'),
+              _onBecomeDelivery),
+          _Chip(
+              TranslationHelper.get('help_q_become_partner'), _onBecomePartner),
         ]));
   }
 
@@ -205,10 +230,12 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
   }
 
   void _addUser(String text) {
-    setState(() => _messages.add(_bubble(Text(
+    setState(() => _messages.add(_bubble(
+        Text(
           text,
           style: const TextStyle(fontSize: 13.5, color: Colors.white),
-        ), isUser: true)));
+        ),
+        isUser: true)));
     _scrollToBottom();
   }
 
@@ -301,19 +328,29 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
           .where('user_id', isEqualTo: _uid)
           .where('order_end', isEqualTo: false)
           .orderBy('created_at', descending: true)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       var isFallback = false;
       if (snap.docs.isEmpty) {
         isFallback = true;
-        final cutoff =
-            Timestamp.fromDate(DateTime.now().subtract(const Duration(days: 3)));
+        final cutoff = Timestamp.fromDate(
+            DateTime.now().subtract(const Duration(days: 3)));
+        // `order_end == true` is redundant in meaning (the query above just
+        // found no `order_end == false` orders, so anything left is ended)
+        // but not in practice: it lets this use the existing
+        // (user_id, order_end, created_at) composite index. Without it this
+        // needs a (user_id, created_at) one that `orders` doesn't have, and
+        // the missing index surfaced as a generic "error" instead of the
+        // "no order found" message whenever a user had no active order.
         snap = await _firestore
             .collection('orders')
             .where('user_id', isEqualTo: _uid)
+            .where('order_end', isEqualTo: true)
             .where('created_at', isGreaterThan: cutoff)
             .orderBy('created_at', descending: true)
             .limit(5)
-            .get();
+            .get()
+            .timeout(_networkTimeout);
       }
       if (!mounted) return;
       _hideTyping();
@@ -322,8 +359,9 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
         _showTopLevelChips();
         return;
       }
-      _addBotText(TranslationHelper.get(
-          isFallback ? 'help_no_active_order_intro' : 'help_active_orders_intro'));
+      _addBotText(TranslationHelper.get(isFallback
+          ? 'help_no_active_order_intro'
+          : 'help_active_orders_intro'));
       _addBotWidget(_orderListCard(snap.docs));
       _pushPanel(() => _chipsPanel(const []));
     } catch (e) {
@@ -338,13 +376,15 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
     }
   }
 
-  Widget _orderListCard(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
+  Widget _orderListCard(
+      List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         for (final doc in docs) ...[
           _orderRow(doc.id, doc.data()),
-          if (doc != docs.last) const Divider(height: 16, color: Color(0xFFF0F1F4)),
+          if (doc != docs.last)
+            const Divider(height: 16, color: Color(0xFFF0F1F4)),
         ],
       ],
     );
@@ -371,7 +411,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    TranslationHelper.get('order_number_label', {'number': number}),
+                    TranslationHelper.get(
+                        'order_number_label', {'number': number}),
                     style: const TextStyle(
                         fontSize: 13.5,
                         fontWeight: FontWeight.w800,
@@ -380,13 +421,16 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
                   const SizedBox(height: 2),
                   Text(
                     _orderStatusLabel(data),
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
+                    style:
+                        const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
                   ),
                 ],
               ),
             ),
             Icon(
-              _isArabic ? Icons.chevron_left_rounded : Icons.chevron_right_rounded,
+              _isArabic
+                  ? Icons.chevron_left_rounded
+                  : Icons.chevron_right_rounded,
               color: const Color(0xFFC9CDD4),
             ),
           ],
@@ -428,6 +472,7 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
     final allowComplaint = !orderEnded || recent;
 
     if (!allowComplaint) {
+      _hideTyping();
       _addBotWidget(_orderInfoCard(data, showTrack: false));
       _addBotText(TranslationHelper.get('help_order_too_old_notice'));
       _showTopLevelChips();
@@ -443,7 +488,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
           .where('reporter', isEqualTo: _uid)
           .where('status', whereIn: ['pending', 'processing'])
           .limit(1)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       if (!mounted) return;
       _hideTyping();
       if (existing.docs.isNotEmpty) {
@@ -451,15 +497,9 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
         _showTopLevelChips();
         return;
       }
-      _addBotWidget(_orderInfoCard(data, showTrack: !orderEnded, orderId: orderId));
-      _pushPanel(() => _chipsPanel([
-            _Chip(TranslationHelper.get('help_q_order_not_received'),
-                () => _onOrderIssueChosen('not_received', orderId, data)),
-            _Chip(TranslationHelper.get('help_q_order_missing'),
-                () => _onOrderIssueChosen('missing', orderId, data)),
-            _Chip(TranslationHelper.get('help_q_order_problem'),
-                () => _onOrderIssueChosen('problem', orderId, data)),
-          ]));
+      _addBotWidget(
+          _orderInfoCard(data, showTrack: !orderEnded, orderId: orderId));
+      _pushPanel(() => _chipsPanel(_orderIssueChips(orderId, data)));
     } catch (e) {
       if (mounted) {
         _hideTyping();
@@ -477,19 +517,90 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
     final storeName = _isArabic
         ? (data['store_name_ar'] as String? ?? '')
         : (data['store_name_fr'] as String? ?? '');
+    final number = data['order_number'] as String? ?? orderId ?? '';
+    final createdAt = (data['created_at'] as Timestamp?)?.toDate();
+    final cancelledAt = (data['cancelled_at'] as Timestamp?)?.toDate();
+    final deliveredAt =
+        ((data['delivered_at'] ?? data['completed_at']) as Timestamp?)
+            ?.toDate();
+    final currency = TranslationHelper.get('currency_unit');
+    String money(String key) =>
+        '${((data[key] as num?) ?? 0).toStringAsFixed(0)} $currency';
+    final discount = (data['discount'] as num?) ?? 0;
+    final lines = _mergeLinesByItem(data);
+
+    Widget row(String labelKey, String value, {bool bold = false}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(TranslationHelper.get(labelKey),
+                  style:
+                      const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC))),
+              const SizedBox(width: 12),
+              Flexible(
+                child: Text(
+                  value,
+                  textAlign: TextAlign.end,
+                  style: TextStyle(
+                      fontSize: bold ? 13.5 : 12.5,
+                      fontWeight: bold ? FontWeight.w800 : FontWeight.w700,
+                      color: const Color(0xFF2E3A59)),
+                ),
+              ),
+            ],
+          ),
+        );
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          storeName.isNotEmpty ? storeName : TranslationHelper.get('unknown_store'),
+          storeName.isNotEmpty
+              ? storeName
+              : TranslationHelper.get('unknown_store'),
           style: const TextStyle(
-              fontSize: 14, fontWeight: FontWeight.w800, color: Color(0xFF2E3A59)),
+              fontSize: 14,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF2E3A59)),
         ),
-        const SizedBox(height: 4),
-        Text(
-          _orderStatusLabel(data),
-          style: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA1AC)),
-        ),
+        if (number.isNotEmpty) ...[
+          const SizedBox(height: 2),
+          Text(
+            TranslationHelper.get('order_number_label', {'number': number}),
+            style: const TextStyle(fontSize: 12.5, color: Color(0xFFFF9800)),
+          ),
+        ],
+        const SizedBox(height: 8),
+        row('help_order_status_label', _orderStatusLabel(data)),
+        if (createdAt != null)
+          row('help_order_date_label', _dateLabel(createdAt)),
+        if (cancelledAt != null)
+          row('help_order_cancelled_at_label', _dateLabel(cancelledAt)),
+        if (deliveredAt != null && data['order_status'] != 'cancelled')
+          row('help_order_delivered_at_label', _dateLabel(deliveredAt)),
+        row('help_order_payment_label',
+            _paymentLabel(data['payment_type'] as String? ?? '')),
+        if (lines.isNotEmpty) ...[
+          const Divider(height: 18, color: Color(0xFFF0F1F4)),
+          for (final line in lines)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Text(
+                '${(line['quantity'] as num?)?.toInt() ?? 1}x ${_lineName(line)}',
+                style:
+                    const TextStyle(fontSize: 12.5, color: Color(0xFF2E3A59)),
+              ),
+            ),
+        ],
+        const Divider(height: 18, color: Color(0xFFF0F1F4)),
+        row('subtotal_label', money('subtotal')),
+        row('delivery_fee_label', money('delivery_fee')),
+        row('service_fee_label', money('service_fee')),
+        if (discount > 0)
+          row('discount_label', '-${discount.toStringAsFixed(0)} $currency'),
+        row('total_label', money('total'), bold: true),
         if (showTrack && orderId != null) ...[
           const SizedBox(height: 10),
           SizedBox(
@@ -504,7 +615,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
               style: OutlinedButton.styleFrom(
                 foregroundColor: const Color(0xFFFF9800),
                 side: const BorderSide(color: Color(0xFFFF9800)),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10)),
               ),
               child: Text(TranslationHelper.get('help_track_live_button')),
             ),
@@ -514,8 +626,31 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
     );
   }
 
+  /// Same meaning as order_history_detail_page.dart's label: `payment_type`
+  /// is "cash_payment", "wallet_balance", or a provider's own name - shown
+  /// as-is when it's not one of the two known values.
+  String _paymentLabel(String paymentType) {
+    switch (paymentType) {
+      case 'cash_payment':
+        return TranslationHelper.get('payment_type_cash');
+      case 'wallet_balance':
+        return TranslationHelper.get('payment_type_wallet_balance');
+      default:
+        return paymentType.isNotEmpty
+            ? paymentType
+            : TranslationHelper.get('payment_type_cash');
+    }
+  }
+
+  String _lineName(Map<String, dynamic> line) {
+    final nameAr = line['name_ar'] as String? ?? '';
+    final nameFr = line['name_fr'] as String? ?? '';
+    return _isArabic && nameAr.isNotEmpty ? nameAr : nameFr;
+  }
+
   Widget _existingReportCard(Map<String, dynamic> report) {
     final reportType = report['report_type'] as String? ?? '';
+    final reason = report['reason'] as String?;
     final status = report['status'] as String? ?? 'pending';
     final message = report['messages'] as String? ?? '';
     return Column(
@@ -524,11 +659,19 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
         Text(
           TranslationHelper.get('help_existing_report_intro'),
           style: const TextStyle(
-              fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF2E3A59)),
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF2E3A59)),
         ),
         const SizedBox(height: 6),
         Text(
-          TranslationHelper.get('help_report_type_$reportType'),
+          // reason is the specific complaint title ("Commande jamais
+          // livrée", "Articles manquants", ...) - falls back to the old
+          // coarse report_type label for a report created before this field
+          // existed.
+          TranslationHelper.get(reason != null
+              ? 'help_report_reason_$reason'
+              : 'help_report_type_$reportType'),
           style: const TextStyle(fontSize: 13, color: Color(0xFF2E3A59)),
         ),
         const SizedBox(height: 2),
@@ -538,21 +681,125 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
         ),
         if (message.isNotEmpty) ...[
           const SizedBox(height: 6),
-          Text(message, style: const TextStyle(fontSize: 12.5, color: Color(0xFF677489))),
+          Text(message,
+              style: const TextStyle(fontSize: 12.5, color: Color(0xFF677489))),
         ],
       ],
     );
   }
 
-  void _onOrderIssueChosen(String kind, String orderId, Map<String, dynamic> order) {
+  /// What can be reported about this particular order. A cancelled order was
+  /// never delivered, so "I didn't receive it" / "missing items" make no
+  /// sense for it - instead, if it was paid online (anything but cash) the
+  /// user can ask where their refund is.
+  List<_Chip> _orderIssueChips(String orderId, Map<String, dynamic> data) {
+    final cancelled = data['order_status'] == 'cancelled';
+    final paymentType = data['payment_type'] as String? ?? '';
+    final paidOnline = paymentType.isNotEmpty && paymentType != 'cash_payment';
+    return [
+      if (!cancelled) ...[
+        _Chip(TranslationHelper.get('help_q_order_not_received'),
+            () => _onOrderIssueChosen('not_received', orderId, data)),
+        _Chip(TranslationHelper.get('help_q_order_missing'),
+            () => _onOrderIssueChosen('missing', orderId, data)),
+      ],
+      if (cancelled && paidOnline)
+        _Chip(TranslationHelper.get('help_q_refund_not_received'),
+            () => _onRefundNotReceived(orderId, data)),
+      _Chip(TranslationHelper.get('help_q_order_problem'),
+          () => _onOrderIssueChosen('problem', orderId, data)),
+    ];
+  }
+
+  /// A cancelled, online-paid order should have two `users_transactions`
+  /// docs sharing its `order_id`: the original payment and (written by
+  /// cancelOrder.js) a `refund`. Found -> just show it. Missing (or failed)
+  /// -> a report message is prepared for the user, who only has to send it.
+  Future<void> _onRefundNotReceived(
+      String orderId, Map<String, dynamic> order) async {
+    _addUser(TranslationHelper.get('help_q_refund_not_received'));
+    if (_busy) return;
+    setState(() => _busy = true);
+    _showTyping();
+    try {
+      final snap = await _firestore
+          .collection('users_transactions')
+          .where('user_id', isEqualTo: _uid)
+          .where('order_id', isEqualTo: orderId)
+          .get()
+          .timeout(_networkTimeout);
+      if (!mounted) return;
+      _hideTyping();
+
+      Map<String, dynamic>? refund;
+      for (final doc in snap.docs) {
+        final tx = doc.data();
+        if (tx['type'] == 'refund' && tx['status'] != 'failed') {
+          refund = tx;
+          break;
+        }
+      }
+
+      if (refund != null) {
+        _addBotText(TranslationHelper.get('help_refund_found_intro'));
+        _addBotWidget(_transactionCard(refund));
+        _addBotText(TranslationHelper.get(refund['status'] == 'pending'
+            ? 'help_refund_pending_notice'
+            : 'help_refund_completed_notice'));
+        _showTopLevelChips();
+        return;
+      }
+
+      _addBotText(TranslationHelper.get('help_refund_missing_notice'));
+      _pushPanel(() => _MessageCard(
+            isArabic: _isArabic,
+            fixedMessage: TranslationHelper.get('help_refund_report_message'),
+            onSend: (_, __) => _sendRefundReport(orderId, order),
+            onCancel: _popPanel,
+          ));
+    } catch (e) {
+      if (mounted) {
+        _hideTyping();
+        _addBotText(TranslationHelper.get(
+            isConnectivityError(e) ? 'no_internet' : 'error'));
+        _showTopLevelChips();
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _sendRefundReport(
+      String orderId, Map<String, dynamic> order) async {
+    await _createReport(
+      reportType: 'user_system',
+      reason: 'refund_not_received',
+      reported: 'system',
+      // Stored in French like the other fixed report messages (the admin
+      // side reads these), not in the user's own language.
+      message: 'Commande annulée : remboursement non reçu.',
+      orderId: orderId,
+      transactionId: order['transaction_id'] as String?,
+      cityId: order['city_id'] as String?,
+      priority: 'high',
+    );
+    if (!mounted) return;
+    _addBotText(TranslationHelper.get('help_report_sent'));
+    _showTopLevelChips();
+  }
+
+  void _onOrderIssueChosen(
+      String kind, String orderId, Map<String, dynamic> order) {
     switch (kind) {
       case 'not_received':
         _addUser(TranslationHelper.get('help_q_order_not_received'));
         _pushPanel(() => _MessageCard(
               isArabic: _isArabic,
-              fixedMessage: TranslationHelper.get('help_order_not_received_message'),
-              onSend: (_) => _sendOrderReport(
+              fixedMessage:
+                  TranslationHelper.get('help_order_not_received_message'),
+              onSend: (_, __) => _sendOrderReport(
                 reportType: 'user_order',
+                reason: 'order_not_received',
                 orderId: orderId,
                 order: order,
                 message: 'Je n\'ai pas reçu ma commande.',
@@ -568,6 +815,7 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
               lines: lines,
               onSend: (message) => _sendOrderReport(
                 reportType: 'user_store',
+                reason: 'items_missing',
                 orderId: orderId,
                 order: order,
                 message: message,
@@ -581,11 +829,13 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
               isArabic: _isArabic,
               hint: TranslationHelper.get('help_problem_hint'),
               showImageButton: true,
-              onSend: (message) => _sendOrderReport(
+              onSend: (message, images) => _sendOrderReport(
                 reportType: 'user_store',
+                reason: 'order_problem',
                 orderId: orderId,
                 order: order,
                 message: message,
+                images: images,
               ),
               onCancel: _popPanel,
             ));
@@ -614,18 +864,22 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
 
   Future<void> _sendOrderReport({
     required String reportType,
+    required String reason,
     required String orderId,
     required Map<String, dynamic> order,
     required String message,
+    List<String> images = const [],
   }) async {
     await _createReport(
       reportType: reportType,
+      reason: reason,
       reported: order['store_id'] as String? ?? '',
       message: message,
+      images: images,
       orderId: orderId,
       transactionId: order['transaction_id'] as String?,
-      cityId: order['city'] as String?,
-      priority: 'hight',
+      cityId: order['city_id'] as String?,
+      priority: 'high',
     );
     if (!mounted) return;
     _addBotText(TranslationHelper.get('help_report_sent'));
@@ -650,7 +904,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
           .where('created_at', isGreaterThan: cutoff)
           .orderBy('created_at', descending: true)
           .limit(5)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       if (!mounted) return;
       _hideTyping();
       if (snap.docs.isEmpty) {
@@ -684,7 +939,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
           .where('transaction_number', isEqualTo: number)
           .where('user_id', isEqualTo: _uid)
           .limit(1)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       if (!mounted) return;
       if (snap.docs.isEmpty) {
         _hideTyping();
@@ -712,7 +968,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
       children: [
         for (final doc in docs) ...[
           _transactionRow(doc.id, doc.data()),
-          if (doc != docs.last) const Divider(height: 16, color: Color(0xFFF0F1F4)),
+          if (doc != docs.last)
+            const Divider(height: 16, color: Color(0xFFF0F1F4)),
         ],
       ],
     );
@@ -747,13 +1004,16 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
                   const SizedBox(height: 2),
                   Text(
                     '${amount.toStringAsFixed(0)} ${TranslationHelper.get('currency_unit')}',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
+                    style:
+                        const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
                   ),
                 ],
               ),
             ),
             Icon(
-              _isArabic ? Icons.chevron_left_rounded : Icons.chevron_right_rounded,
+              _isArabic
+                  ? Icons.chevron_left_rounded
+                  : Icons.chevron_right_rounded,
               color: const Color(0xFFC9CDD4),
             ),
           ],
@@ -762,7 +1022,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
     );
   }
 
-  Future<void> _onTransactionPicked(String transactionId, Map<String, dynamic> data,
+  Future<void> _onTransactionPicked(
+      String transactionId, Map<String, dynamic> data,
       {bool announce = true}) async {
     if (announce) {
       final number = data['transaction_number'] as String? ?? transactionId;
@@ -778,7 +1039,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
           .where('reporter', isEqualTo: _uid)
           .where('status', whereIn: ['pending', 'processing'])
           .limit(1)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       if (!mounted) return;
       _hideTyping();
       if (existing.docs.isNotEmpty) {
@@ -823,7 +1085,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(TranslationHelper.get(labelKey),
-                  style: const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC))),
+                  style:
+                      const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC))),
               Text(value,
                   style: const TextStyle(
                       fontSize: 12.5,
@@ -839,7 +1102,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
             '${amount.toStringAsFixed(0)} ${TranslationHelper.get('currency_unit')}'),
         if (createdAt != null)
           row('help_transaction_date_label', _dateLabel(createdAt)),
-        row('help_transaction_type_label', TranslationHelper.get('transaction_type_$type')),
+        row('help_transaction_type_label',
+            TranslationHelper.get('transaction_type_$type')),
         row('help_transaction_status_label',
             TranslationHelper.get('transaction_status_$status')),
         if (paymentType.isNotEmpty)
@@ -848,18 +1112,20 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
     );
   }
 
-  void _onTxIssueChosen(String kind, String transactionId, Map<String, dynamic> tx) {
+  void _onTxIssueChosen(
+      String kind, String transactionId, Map<String, dynamic> tx) {
     switch (kind) {
       case 'not_mine':
         _addUser(TranslationHelper.get('help_q_tx_not_mine'));
         _pushPanel(() => _MessageCard(
               isArabic: _isArabic,
               hint: TranslationHelper.get('help_tx_not_mine_hint'),
-              onSend: (message) => _sendTxReport(
+              onSend: (message, _) => _sendTxReport(
                 transactionId: transactionId,
                 tx: tx,
                 message: message,
-                priority: 'hight',
+                priority: 'high',
+                reason: 'tx_not_mine',
               ),
               onCancel: _popPanel,
             ));
@@ -873,11 +1139,12 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
                   _pushPanel(() => _MessageCard(
                         isArabic: _isArabic,
                         hint: TranslationHelper.get('help_tx_deduction_hint'),
-                        onSend: (message) => _sendTxReport(
+                        onSend: (message, _) => _sendTxReport(
                           transactionId: transactionId,
                           tx: tx,
                           message: message,
-                          priority: 'hight',
+                          priority: 'high',
+                          reason: 'tx_deduction',
                         ),
                         onCancel: _popPanel,
                       ));
@@ -890,11 +1157,12 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
         _pushPanel(() => _MessageCard(
               isArabic: _isArabic,
               hint: TranslationHelper.get('help_tx_error_hint'),
-              onSend: (message) => _sendTxReport(
+              onSend: (message, _) => _sendTxReport(
                 transactionId: transactionId,
                 tx: tx,
                 message: message,
                 priority: 'normal',
+                reason: 'tx_error',
               ),
               onCancel: _popPanel,
             ));
@@ -907,15 +1175,17 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
     required Map<String, dynamic> tx,
     required String message,
     required String priority,
+    required String reason,
   }) async {
-    final address = (tx['summary_section'] as Map?)?['address'] as Map?;
+    final summary = tx['summary_section'] as Map?;
     await _createReport(
       reportType: 'user_system',
+      reason: reason,
       reported: 'system',
       message: message,
       transactionId: transactionId,
       orderId: tx['order_id'] as String?,
-      cityId: address?['city'] as String?,
+      cityId: summary?['city_id'] as String?,
       priority: priority,
     );
     if (!mounted) return;
@@ -933,13 +1203,13 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
     setState(() => _busy = true);
     _showTyping();
     try {
-      final userDoc = await _firestore.collection('users').doc(_uid).get();
-      final cityId = (userDoc.data()?['address'] as Map?)?['city'] as String?;
-      Map<String, dynamic>? city;
-      if (cityId != null) {
-        final cityDoc = await _firestore.collection('cities').doc(cityId).get();
-        city = cityDoc.data();
-      }
+      // The active location's city (LocationService) - fees by city id.
+      final cityId = LocationService.instance.cityId;
+      final Map<String, dynamic>? city = cityId == null
+          ? null
+          : await CitiesService.instance
+              .fetchCityDoc(cityId)
+              .timeout(_networkTimeout);
       if (!mounted) return;
       _hideTyping();
       if (city == null) {
@@ -952,8 +1222,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
         final isRaining = city['rain'] == true;
         final currency = TranslationHelper.get('currency_unit');
         final rainNote = isRaining
-            ? TranslationHelper.get(
-                'help_delivery_fee_rain_note', {'amount': rainFee, 'currency': currency})
+            ? TranslationHelper.get('help_delivery_fee_rain_note',
+                {'amount': rainFee, 'currency': currency})
             : '';
         _addBotText(TranslationHelper.get('help_delivery_fee_explanation', {
           'base': base,
@@ -983,32 +1253,89 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
   }
 
   void _onBecomePartner() {
-    _addUser(TranslationHelper.get('help_q_become_partner'));
+    if (_blockIfAlreadyHasRole('help_q_become_partner')) return;
+    _showApplyCard(
+      questionKey: 'help_q_become_partner',
+      messageKey: 'help_become_partner_message',
+      type: DemandeType.store,
+    );
+  }
+
+  void _onBecomeDelivery() {
+    if (_blockIfAlreadyHasRole('help_q_become_delivery')) return;
+    _showApplyCard(
+      questionKey: 'help_q_become_delivery',
+      messageKey: 'help_become_delivery_message',
+      type: DemandeType.delivery,
+    );
+  }
+
+  /// `role` (UserProfileCache) is only ever "owner"/"delivery"/null, and a
+  /// user only ever holds one of the two - an existing driver can't also
+  /// apply to become a store owner, and vice versa, not just "can't apply
+  /// again for the role they already have". So this blocks BOTH apply flows
+  /// the moment role is non-null, showing the message that matches the
+  /// user's own actual role rather than whichever button they just tapped.
+  /// Returns true (and shows the message) if blocked.
+  bool _blockIfAlreadyHasRole(String questionKey) {
+    final role = UserProfileCache.instance.role;
+    if (role != 'owner' && role != 'delivery') return false;
+    _addUser(TranslationHelper.get(questionKey));
+    _addBotText(TranslationHelper.get(role == 'owner'
+        ? 'help_already_store_message'
+        : 'help_already_delivery_message'));
+    _showTopLevelChips();
+    return true;
+  }
+
+  /// One question ("become a partner" / "become a delivery driver"), one
+  /// answer with a "Commencer" button that opens the matching application
+  /// form (DemandePage) - the two flows differ only in which type is passed.
+  /// Only reached once the role check above has already ruled out the user
+  /// already being that role.
+  void _showApplyCard({
+    required String questionKey,
+    required String messageKey,
+    required DemandeType type,
+  }) {
+    _addUser(TranslationHelper.get(questionKey));
     _addBotWidget(Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          TranslationHelper.get('help_become_partner_message'),
-          style: const TextStyle(fontSize: 13.5, color: Color(0xFF2E3A59), height: 1.4),
+          TranslationHelper.get(messageKey),
+          style: const TextStyle(
+              fontSize: 13.5, color: Color(0xFF2E3A59), height: 1.4),
         ),
         const SizedBox(height: 10),
         SizedBox(
           width: double.infinity,
           child: ElevatedButton(
-            onPressed: () =>
-                showAlert(TranslationHelper.get('help_partner_link_coming_soon')),
+            onPressed: () => _openDemande(type),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFFFF9800),
               foregroundColor: Colors.white,
               elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
             ),
-            child: Text(TranslationHelper.get('help_become_partner_button')),
+            child: Text(TranslationHelper.get('help_start_button')),
           ),
         ),
       ],
     ));
     _showTopLevelChips();
+  }
+
+  Future<void> _openDemande(DemandeType type) async {
+    final sent = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => DemandePage(widget.language, type)),
+    );
+    if (sent == true && mounted) {
+      _addBotText(TranslationHelper.get('help_demande_sent'));
+      _showTopLevelChips();
+    }
   }
 
   String _dateLabel(DateTime date) {
@@ -1024,17 +1351,26 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
 
   Future<void> _createReport({
     required String reportType,
+    required String reason,
     required String reported,
     required String message,
+    List<String> images = const [],
     String? orderId,
     String? transactionId,
+    /// reports.city_id - straight from the order's / transaction's own
+    /// city_id (lib/map.txt); null just leaves the report unrouted.
     String? cityId,
     required String priority,
-  }) {
-    return _firestore.collection('reports').add({
+  }) async {
+    await _firestore.collection('reports').add({
       'created_at': FieldValue.serverTimestamp(),
       'updated_at': FieldValue.serverTimestamp(),
       'report_type': reportType,
+      // The specific complaint, shown as the report's title
+      // (help_report_reason_$reason) - report_type stays the coarse
+      // reporter/reported pair (map.txt) reserved for a future non-user
+      // reporter, it was never meant to carry this level of detail.
+      'reason': reason,
       'reported': reported,
       'reporter': _uid,
       'city_id': cityId,
@@ -1044,7 +1380,7 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
       'order_id': orderId,
       'priority': priority,
       'messages': message,
-      'images': <String>[],
+      'images': images,
     });
   }
 
@@ -1057,15 +1393,14 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
       decoration: const BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4))],
+        boxShadow: [
+          BoxShadow(
+              color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4))
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (_panelStack.length > 1) ...[
-            _buildBackRow(),
-            const SizedBox(height: 10),
-          ],
           if (chips.isNotEmpty) ...[
             Text(
               TranslationHelper.get('help_faq_label'),
@@ -1076,44 +1411,31 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
                   letterSpacing: 0.5),
             ),
             const SizedBox(height: 8),
+          ],
+          // "Retour" is one more button in the same row as the questions,
+          // styled exactly like them, instead of a separate text link.
+          if (chips.isNotEmpty || _panelStack.length > 1)
             Wrap(
               spacing: 8,
               runSpacing: 8,
-              children: [for (final chip in chips) _chipButton(chip)],
+              children: [
+                if (_panelStack.length > 1) _backChip(),
+                for (final chip in chips) _chipButton(chip),
+              ],
             ),
-          ],
         ],
       ),
     );
   }
 
-  Widget _buildBackRow() {
-    return InkWell(
-      onTap: _popPanel,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              _isArabic ? Icons.arrow_forward_rounded : Icons.arrow_back_rounded,
-              size: 15,
-              color: const Color(0xFF9AA1AC),
-            ),
-            const SizedBox(width: 4),
-            Text(
-              TranslationHelper.get('help_back'),
-              style: const TextStyle(
-                  fontSize: 12.5, fontWeight: FontWeight.w700, color: Color(0xFF9AA1AC)),
-            ),
-          ],
-        ),
-      ),
+  Widget _backChip() {
+    return _chipButton(
+      _Chip(TranslationHelper.get('help_back'), _popPanel),
+      icon: _isArabic ? Icons.arrow_forward_rounded : Icons.arrow_back_rounded,
     );
   }
 
-  Widget _chipButton(_Chip chip) {
+  Widget _chipButton(_Chip chip, {IconData? icon}) {
     return OutlinedButton(
       // Live `_busy` check at tap time, not baked in at build time - see
       // _orderRow's comment for why (this panel can be (re)built while
@@ -1130,9 +1452,21 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       ),
-      child: Text(
-        chip.label,
-        style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 15),
+            const SizedBox(width: 5),
+          ],
+          Flexible(
+            child: Text(
+              chip.label,
+              style:
+                  const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1152,7 +1486,11 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
                 child: ListView(
                   controller: _scrollController,
                   padding: const EdgeInsets.all(16),
-                  children: _messages,
+                  // A copy, not `_messages` itself: ListView's delegate only
+                  // rebuilds when the children list *instance* changes, so
+                  // mutating the same list in place left new bubbles unpainted
+                  // until something else forced a rebuild.
+                  children: [..._messages],
                 ),
               ),
               _panel ?? const SizedBox.shrink(),
@@ -1198,7 +1536,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
               ),
               borderRadius: BorderRadius.circular(11),
             ),
-            child: const Icon(Icons.help_rounded, color: Colors.white, size: 18),
+            child:
+                const Icon(Icons.help_rounded, color: Colors.white, size: 18),
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -1223,7 +1562,8 @@ class _HelpPageState extends State<HelpPage> with AlertCardMixin {
 class _TransactionNumberCard extends StatefulWidget {
   final bool isArabic;
   final ValueChanged<String> onSubmit;
-  const _TransactionNumberCard({required this.isArabic, required this.onSubmit});
+  const _TransactionNumberCard(
+      {required this.isArabic, required this.onSubmit});
 
   @override
   State<_TransactionNumberCard> createState() => _TransactionNumberCardState();
@@ -1244,7 +1584,10 @@ class _TransactionNumberCardState extends State<_TransactionNumberCard> {
       padding: const EdgeInsets.all(16),
       decoration: const BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4))],
+        boxShadow: [
+          BoxShadow(
+              color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4))
+        ],
       ),
       child: Row(
         children: [
@@ -1276,7 +1619,8 @@ class _TransactionNumberCardState extends State<_TransactionNumberCard> {
               foregroundColor: Colors.white,
               elevation: 0,
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
             ),
             child: Text(TranslationHelper.get('help_search_button')),
           ),
@@ -1297,7 +1641,7 @@ class _MessageCard extends StatefulWidget {
   final String? fixedMessage;
   final String? hint;
   final bool showImageButton;
-  final Future<void> Function(String) onSend;
+  final Future<void> Function(String message, List<String> images) onSend;
   final VoidCallback onCancel;
 
   const _MessageCard({
@@ -1314,11 +1658,33 @@ class _MessageCard extends StatefulWidget {
 }
 
 class _MessageCardState extends State<_MessageCard> with AlertCardMixin {
+  // Unlike every other upload in the app (demande_page.dart,
+  // store_info_edit_page.dart/store_item_edit_page.dart), a report photo has
+  // no size cap - it's evidence for a support case (a screenshot, a photo of
+  // a wrong/missing item), and compressing/rejecting it could hide the
+  // detail that actually matters.
+  static const _maxImages = 3;
+
   final _controller = TextEditingController();
+  final _images = <String>[];
   bool _sending = false;
+  bool _uploadingImage = false;
+  bool _sent = false;
 
   @override
   void dispose() {
+    // A report photo is uploaded to Storage the moment it's picked (so the
+    // thumbnail can show right away), before the report itself is ever
+    // created - if this card goes away without a successful send (Annuler,
+    // or just navigating back), those uploads would otherwise leak forever
+    // with nothing ever referencing them. Best-effort, not awaited - dispose
+    // can't be async, and a failed cleanup delete here is a harmless orphan
+    // rather than a correctness problem.
+    if (!_sent) {
+      for (final url in _images) {
+        FirebaseStorage.instance.refFromURL(url).delete().catchError((_) {});
+      }
+    }
     _controller.dispose();
     disposeAlert();
     super.dispose();
@@ -1330,15 +1696,57 @@ class _MessageCardState extends State<_MessageCard> with AlertCardMixin {
     if (_sending) return;
     setState(() => _sending = true);
     try {
-      await widget.onSend(message);
+      await widget.onSend(message, _images);
+      _sent =
+          true; // the report now owns these images - dispose() must not delete them
     } catch (e) {
       if (mounted) {
         setState(() => _sending = false);
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
+    }
+  }
+
+  Future<void> _pickImage() async {
+    if (_uploadingImage || _images.length >= _maxImages) return;
+    final XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 45,
+        maxWidth: 1024,
+      );
+    } catch (e) {
+      showAlert(TranslationHelper.get('error'), isError: true);
+      return;
+    }
+    if (picked == null) return;
+
+    setState(() => _uploadingImage = true);
+    try {
+      final online = await InternetConnectionService().checkNow();
+      if (!online) throw Exception('offline');
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+      final ref =
+          FirebaseStorage.instance.ref('reports/$uid/${const Uuid().v4()}.jpg');
+      await ref.putFile(File(picked.path));
+      final url = await ref.getDownloadURL();
+      if (!mounted) return;
+      setState(() => _images.add(url));
+    } catch (e) {
+      if (mounted) {
+        showAlert(
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
+          isError: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _uploadingImage = false);
     }
   }
 
@@ -1348,7 +1756,10 @@ class _MessageCardState extends State<_MessageCard> with AlertCardMixin {
       padding: const EdgeInsets.all(16),
       decoration: const BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4))],
+        boxShadow: [
+          BoxShadow(
+              color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4))
+        ],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1359,7 +1770,8 @@ class _MessageCardState extends State<_MessageCard> with AlertCardMixin {
               alignment: Alignment.centerLeft,
               child: Text(
                 widget.fixedMessage!,
-                style: const TextStyle(fontSize: 13.5, color: Color(0xFF2E3A59)),
+                style:
+                    const TextStyle(fontSize: 13.5, color: Color(0xFF2E3A59)),
               ),
             )
           else
@@ -1379,16 +1791,35 @@ class _MessageCardState extends State<_MessageCard> with AlertCardMixin {
             ),
           if (widget.showImageButton) ...[
             const SizedBox(height: 8),
+            if (_images.isNotEmpty)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [for (final url in _images) _imageThumb(url)],
+                ),
+              ),
+            if (_images.isNotEmpty) const SizedBox(height: 8),
             Align(
               alignment: Alignment.centerLeft,
               child: TextButton.icon(
-                onPressed: () =>
-                    showAlert(TranslationHelper.get('help_add_image_coming_soon')),
-                icon: const Icon(Icons.image_outlined,
-                    size: 17, color: Color(0xFF9AA1AC)),
+                onPressed: _images.length >= _maxImages
+                    ? null
+                    : (_uploadingImage ? null : _pickImage),
+                icon: _uploadingImage
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Color(0xFF9AA1AC)),
+                      )
+                    : const Icon(Icons.image_outlined,
+                        size: 17, color: Color(0xFF9AA1AC)),
                 label: Text(
                   TranslationHelper.get('help_add_image_button'),
-                  style: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA1AC)),
+                  style:
+                      const TextStyle(fontSize: 12.5, color: Color(0xFF9AA1AC)),
                 ),
               ),
             ),
@@ -1402,7 +1833,8 @@ class _MessageCardState extends State<_MessageCard> with AlertCardMixin {
                   style: OutlinedButton.styleFrom(
                     foregroundColor: const Color(0xFF677489),
                     side: const BorderSide(color: Color(0xFFE5E8ED)),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                   child: Text(TranslationHelper.get('help_cancel_button')),
                 ),
@@ -1415,7 +1847,8 @@ class _MessageCardState extends State<_MessageCard> with AlertCardMixin {
                     backgroundColor: const Color(0xFFFF9800),
                     foregroundColor: Colors.white,
                     elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                   child: _sending
                       ? const SizedBox(
@@ -1431,6 +1864,42 @@ class _MessageCardState extends State<_MessageCard> with AlertCardMixin {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _imageThumb(String url) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Image.network(url, width: 56, height: 56, fit: BoxFit.cover),
+        ),
+        Positioned(
+          top: -6,
+          right: -6,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () {
+              setState(() => _images.remove(url));
+              FirebaseStorage.instance
+                  .refFromURL(url)
+                  .delete()
+                  .catchError((_) {});
+            },
+            child: Container(
+              width: 20,
+              height: 20,
+              decoration: const BoxDecoration(
+                color: Color(0xFFE74C3C),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.close_rounded,
+                  size: 13, color: Colors.white),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1455,9 +1924,11 @@ class _MissingItemsCard extends StatefulWidget {
   State<_MissingItemsCard> createState() => _MissingItemsCardState();
 }
 
-class _MissingItemsCardState extends State<_MissingItemsCard> with AlertCardMixin {
+class _MissingItemsCardState extends State<_MissingItemsCard>
+    with AlertCardMixin {
   late final Map<String, int> _missing = {
-    for (final line in widget.lines) (line['item_id'] as String? ?? line.hashCode.toString()): 0,
+    for (final line in widget.lines)
+      (line['item_id'] as String? ?? line.hashCode.toString()): 0,
   };
   bool _sending = false;
 
@@ -1467,11 +1938,13 @@ class _MissingItemsCardState extends State<_MissingItemsCard> with AlertCardMixi
     super.dispose();
   }
 
+  // The report message is always written in French (read by admin), so the
+  // French name is preferred whatever language the user's app is in.
   String _name(Map<String, dynamic> line) {
-    final nameAr = line['name_ar'] as String? ?? '';
-    final nameFr = line['name_fr'] as String? ?? '';
-    final name = widget.isArabic && nameAr.isNotEmpty ? nameAr : nameFr;
-    return name.isNotEmpty ? name : nameFr;
+    final fr = line['name_fr'] as String? ?? '';
+    if (fr.isNotEmpty) return fr;
+    final ar = line['name_ar'] as String? ?? '';
+    return ar;
   }
 
   Future<void> _send() async {
@@ -1490,7 +1963,8 @@ class _MissingItemsCardState extends State<_MissingItemsCard> with AlertCardMixi
       if (mounted) {
         setState(() => _sending = false);
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
@@ -1505,7 +1979,10 @@ class _MissingItemsCardState extends State<_MissingItemsCard> with AlertCardMixi
       constraints: const BoxConstraints(maxHeight: 380),
       decoration: const BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4))],
+        boxShadow: [
+          BoxShadow(
+              color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -4))
+        ],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1531,7 +2008,8 @@ class _MissingItemsCardState extends State<_MissingItemsCard> with AlertCardMixi
                   style: OutlinedButton.styleFrom(
                     foregroundColor: const Color(0xFF677489),
                     side: const BorderSide(color: Color(0xFFE5E8ED)),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                   child: Text(TranslationHelper.get('help_cancel_button')),
                 ),
@@ -1545,7 +2023,8 @@ class _MissingItemsCardState extends State<_MissingItemsCard> with AlertCardMixi
                     foregroundColor: Colors.white,
                     disabledBackgroundColor: const Color(0xFFFFD9A6),
                     elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                   child: Text(TranslationHelper.get('help_continue_button')),
                 ),
@@ -1573,21 +2052,27 @@ class _MissingItemsCardState extends State<_MissingItemsCard> with AlertCardMixi
               style: const TextStyle(fontSize: 13, color: Color(0xFF2E3A59)),
             ),
           ),
-          _stepperButton(Icons.remove, count > 0
-              ? () => setState(() => _missing[id] = count - 1)
-              : null),
+          _stepperButton(
+              Icons.remove,
+              count > 0
+                  ? () => setState(() => _missing[id] = count - 1)
+                  : null),
           SizedBox(
             width: 28,
             child: Text(
               '$count',
               textAlign: TextAlign.center,
-              style:
-                  const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF2E3A59)),
+              style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF2E3A59)),
             ),
           ),
-          _stepperButton(Icons.add, count < quantity
-              ? () => setState(() => _missing[id] = count + 1)
-              : null),
+          _stepperButton(
+              Icons.add,
+              count < quantity
+                  ? () => setState(() => _missing[id] = count + 1)
+                  : null),
         ],
       ),
     );
@@ -1605,7 +2090,10 @@ class _MissingItemsCardState extends State<_MissingItemsCard> with AlertCardMixi
           borderRadius: BorderRadius.circular(8),
         ),
         child: Icon(icon,
-            size: 14, color: onTap == null ? const Color(0xFFC9CDD4) : const Color(0xFFFF9800)),
+            size: 14,
+            color: onTap == null
+                ? const Color(0xFFC9CDD4)
+                : const Color(0xFFFF9800)),
       ),
     );
   }

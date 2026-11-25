@@ -6,6 +6,7 @@ import 'package:flutter_application_1/pages/client/store_details_page.dart';
 import 'package:flutter_application_1/utils/order_reorder_service.dart';
 import 'package:flutter_application_1/utils/store_cart_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
+import 'package:flutter_application_1/utils/location_service.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
 /// One store's cart - `users/{uid}/carts/{storeId}` (`lib/map.txt`) - with
@@ -52,11 +53,9 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
   late final Stream<DocumentSnapshot<Map<String, dynamic>>> _cartStream =
       StoreCartService.watch(widget.uid, widget.storeId);
 
-  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _userStream =
-      FirebaseFirestore.instance
-          .collection('users')
-          .doc(widget.uid)
-          .snapshots();
+  /// The active location comes from [LocationService] - live, so a
+  /// location change elsewhere updates the checkout bar.
+  bool get _locationReady => LocationService.instance.active != null;
 
   @override
   void initState() {
@@ -301,23 +300,16 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
           builder: (context, storeSnap) {
             final storeData = storeSnap.data?.data();
             final storeStatus = storeData?['status'] as String?;
-            final storeCity = storeData?['city'] as String?;
-            return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-              stream: _userStream,
-              builder: (context, userSnap) {
-                final userCity = (userSnap.data?.data()?['address']
-                    as Map<String, dynamic>?)?['city'] as String?;
-                // Both docs must have actually loaded and agree - a cart
-                // can outlive the user moving to a different city (or a
-                // brief moment before either doc resolves), and delivery
-                // isn't possible outside the user's current city, same
-                // rule as OrderReorderService.isStoreInUserCity.
-                final sameCity =
-                    OrderReorderService.citiesMatch(storeCity, userCity);
-                final citiesLoaded =
-                    storeSnap.data != null && userSnap.data != null;
+            return ListenableBuilder(
+              listenable: LocationService.instance,
+              builder: (context, _) {
+                // A cart can outlive the user moving (another city, or
+                // now too far) - same rule as checkout and reorder.
+                final reason =
+                    OrderReorderService.undeliverableReason(storeData);
+                final citiesLoaded = storeSnap.data != null && _locationReady;
                 return _buildCheckoutBar(waitingPayment, storeStatus,
-                    citiesLoaded: citiesLoaded, sameCity: sameCity);
+                    citiesLoaded: citiesLoaded, undeliverableReason: reason);
               },
             );
           },
@@ -372,8 +364,7 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
             const SizedBox(height: 10),
             Container(
               width: double.infinity,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(10),
@@ -658,14 +649,14 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
   }
 
   Widget _buildCheckoutBar(bool waitingPayment, String? storeStatus,
-      {required bool citiesLoaded, required bool sameCity}) {
+      {required bool citiesLoaded, required String? undeliverableReason}) {
     final isClosed = storeStatus == 'close';
     final isBusy = storeStatus == 'trafic';
     // A real (loaded) mismatch, not just "still loading" - during load
     // citiesLoaded is false so this stays false too, keeping the button's
     // label neutral instead of flashing "different city" before either doc
     // has actually resolved.
-    final differentCity = citiesLoaded && !sameCity;
+    final differentCity = citiesLoaded && undeliverableReason != null;
     // storeStatus == null / !citiesLoaded means a doc hasn't loaded yet -
     // fails closed (checkout stays disabled) rather than briefly allowing a
     // tap before the real state is known.
@@ -679,7 +670,7 @@ class _CartPageState extends State<CartPage> with AlertCardMixin {
     final label = waitingPayment
         ? TranslationHelper.get('waiting_payment_title')
         : differentCity
-            ? TranslationHelper.get('reorder_different_city')
+            ? TranslationHelper.get(undeliverableReason)
             : isClosed
                 ? TranslationHelper.get('store_closed')
                 : isBusy

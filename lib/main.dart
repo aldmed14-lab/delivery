@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -5,12 +8,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_application_1/pages/client/home_shell.dart';
-import 'package:flutter_application_1/pages/registre/auth_page.dart';
-import 'package:flutter_application_1/pages/registre/language.dart';
-import 'package:flutter_application_1/utils/connection.dart';
-import 'package:flutter_application_1/utils/connection_ui.dart';
+import 'package:flutter_application_1/pages/auth/auth_page.dart';
+import 'package:flutter_application_1/pages/auth/language_selection_page.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
+import 'package:flutter_application_1/utils/connection_dialog.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/delivery_offer_overlay.dart';
+import 'package:flutter_application_1/widgets/update_required_dialog.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
@@ -47,7 +51,7 @@ class MainPage extends StatefulWidget {
   const MainPage({super.key});
 
   @override
-  _MainPageState createState() => _MainPageState();
+  State<MainPage> createState() => _MainPageState();
 }
 
 class _MainPageState extends State<MainPage> {
@@ -84,7 +88,57 @@ class _MainPageState extends State<MainPage> {
     }
   }
 
+  /// Returns true when the app may continue. Compares lib/version.json's
+  /// `version` against system/config's android_version (ios_version on
+  /// iOS); on mismatch shows the blocking update dialog with
+  /// android_applink / ios_applink and returns false.
+  ///
+  /// A missing config doc or an empty version field skips the check, so a
+  /// config mistake never locks every user out of the app.
+  Future<bool> _checkAppVersion() async {
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+
+    final localJson = await rootBundle.loadString('lib/version.json');
+    final localVersion =
+        ((jsonDecode(localJson) as Map<String, dynamic>)['version'] ?? '')
+            .toString()
+            .trim();
+
+    final config = (await FirebaseFirestore.instance
+                .collection('system')
+                .doc('config')
+                .get())
+            .data() ??
+        const {};
+    final requiredVersion =
+        (config[isIos ? 'ios_version' : 'android_version'] ?? '')
+            .toString()
+            .trim();
+    if (requiredVersion.isEmpty || requiredVersion == localVersion) {
+      return true;
+    }
+
+    if (!mounted) return false;
+    UpdateRequiredDialog.show(
+      context,
+      language: TranslationHelper.currentLanguage,
+      appLink: (config[isIos ? 'ios_applink' : 'android_applink'] ?? '')
+          .toString(),
+    );
+    return false;
+  }
+
   Future<void> _checkAuthAndFCM() async {
+    try {
+      if (!await _checkAppVersion()) return;
+    } catch (e) {
+      if (!mounted) return;
+      _showSnack(isConnectivityError(e)
+          ? TranslationHelper.get('no_internet')
+          : TranslationHelper.get('error'));
+      return;
+    }
+
     final prefs = await SharedPreferences.getInstance();
     String? languagePref = prefs.getString('language');
 
@@ -118,15 +172,10 @@ class _MainPageState extends State<MainPage> {
       DocumentReference userDoc =
           FirebaseFirestore.instance.collection('users').doc(uid);
       DocumentSnapshot snapshot = await userDoc.get();
-
-      if (snapshot.exists && snapshot["fmc"] == currentFcm) {
-        if (snapshot["active"] == true) {
-          _goToHomePage();
-        } else {
-          _goblockPage();
-        }
+      if (snapshot.exists && snapshot["active"] == true) {
+        _goToHomePage();
       } else {
-        _goToAuthPage();
+        _goblockPage();
       }
     } catch (e) {
       if (!mounted) return;

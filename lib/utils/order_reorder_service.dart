@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_application_1/utils/store_cart_service.dart';
+import 'package:flutter_application_1/utils/cities_service.dart';
+import 'package:flutter_application_1/utils/location_service.dart';
 
 enum ReorderOutcome {
   success,
@@ -35,34 +37,36 @@ class OrderReorderService {
     return snap.data()?['status'] == 'open';
   }
 
-  static Future<String?> _userCity(String uid) async {
-    final snap = await _firestore.collection('users').doc(uid).get();
-    return (snap.data()?['address'] as Map<String, dynamic>?)?['city']
-        as String?;
+  /// Can the active location get delivery from [store] (a `stores` doc's
+  /// data)? Same city (by city_id) and not beyond the store's (else the
+  /// city's) max_delivery_km. Shared by store details, cart, checkout and
+  /// reorder so they all apply the exact same rule.
+  static bool deliversToActiveLocation(Map<String, dynamic>? store) =>
+      undeliverableReason(store) == null;
+
+  /// Why [store] can't deliver to the active location, as a translation
+  /// key - null when it can.
+  static String? undeliverableReason(Map<String, dynamic>? store) {
+    final active = LocationService.instance.active;
+    if (store == null || active == null) return 'reorder_different_city';
+    final storeCityId = store['city_id'] as String?;
+    if (storeCityId == null || storeCityId != active.cityId) {
+      return 'reorder_different_city';
+    }
+    if (CitiesService.instance.isTooFar(store, active.lat, active.lng)) {
+      return 'store_too_far';
+    }
+    return null;
   }
 
-  /// A past order can be from a store in a city the user has since moved
-  /// away from - delivery isn't possible outside the user's current
-  /// serviced city, so reorder only makes sense when the store's city
-  /// still matches it.
+  /// A past order can be from a store the active location can't get
+  /// delivery from anymore (another city, or too far).
   static Future<bool> isStoreInUserCity(String uid, String storeId) async {
     final storeSnap = await _firestore.collection('stores').doc(storeId).get();
-    final storeCity = storeSnap.data()?['city'] as String?;
-    final userCity = await _userCity(uid);
-    return citiesMatch(storeCity, userCity);
-  }
-
-  /// The actual comparison [isStoreInUserCity] does, pulled out as a pure
-  /// read-free check - store_details_page.dart and cart_page.dart apply
-  /// this exact same "not deliverable outside the user's city" rule, but
-  /// already have both cities loaded from their own listeners, so routing
-  /// them through [isStoreInUserCity] itself would cost them a second,
-  /// redundant read of the store doc they already have in hand.
-  static bool citiesMatch(String? storeCity, String? userCity) {
-    return storeCity != null &&
-        storeCity.isNotEmpty &&
-        userCity != null &&
-        userCity == storeCity;
+    try {
+      await CitiesService.instance.ensureLoaded();
+    } catch (_) {}
+    return deliversToActiveLocation(storeSnap.data());
   }
 
   /// Whether "Recommander" should even be shown - open and in the user's

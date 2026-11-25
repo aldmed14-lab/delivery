@@ -3,15 +3,16 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_application_1/pages/client/address_flow.dart';
 import 'package:flutter_application_1/pages/client/app_bottom_nav.dart';
-import 'package:flutter_application_1/pages/client/location_picker_sheet.dart';
 import 'package:flutter_application_1/pages/client/search_page.dart';
-import 'package:flutter_application_1/pages/client/select_location_page.dart';
 import 'package:flutter_application_1/pages/client/store_details_page.dart';
 import 'package:flutter_application_1/utils/ad_service.dart';
 import 'package:flutter_application_1/utils/banner_service.dart';
+import 'package:flutter_application_1/utils/cities_service.dart';
 import 'package:flutter_application_1/utils/city_resolver.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
+import 'package:flutter_application_1/utils/location_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/url_utils.dart';
 import 'package:flutter_application_1/utils/user_profile_cache.dart';
@@ -30,7 +31,7 @@ class HomePage extends StatefulWidget {
   const HomePage(this.language, {this.onNavigateTab, super.key});
 
   @override
-  _HomePageState createState() => _HomePageState();
+  State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
@@ -44,19 +45,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String isSelected = "all";
   String uid = "";
   String name = "";
-  String? cityName;
-
-  /// Name of the currently active saved address (null for the unnamed
-  /// "current location" default) - just for highlighting the active row in
-  /// [LocationPickerSheet].
-  String? _activeLocationName;
+  /// The active location's city (LocationService) - what the feed, banner
+  /// and ads are for.
+  String? _cityId;
+  double? _activeLat;
+  double? _activeLng;
   bool _needsLocation = false;
 
   /// True while an on-demand "use current location" GPS lookup (see
   /// [_useCurrentLocation]) is in flight, so its trigger button(s) can show
   /// a spinner instead of double-firing.
   bool _locatingCurrentPosition = false;
-  int aaaa = 0;
   bool _isDialogShowing = false;
   final InternetConnectionService _connectionService =
       InternetConnectionService();
@@ -77,6 +76,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    LocationService.instance.addListener(_onLocationChanged);
     _initConnectivity();
 
     _scrollController.addListener(() {
@@ -130,32 +130,56 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  /// Loads the signed-in user's doc exactly once and hands its `address` to
-  /// [_checkUserLocation] instead of that function re-fetching the same
-  /// document again.
+  /// Home start (lib/note.txt LOCATION SYSTEM "home start"):
+  ///  1. instant - the last active location saved on this phone, so the
+  ///     city's stores show without waiting for the network or GPS;
+  ///  2. background - cities (re-downloaded only if cities_version changed,
+  ///     then saved addresses re-checked), the user doc, the default saved
+  ///     address (switched to if it differs), and a quiet GPS check;
+  ///  3. default_address_id == "current_location" (the user picked current
+  ///     location) or no saved address - fresh GPS, browsing only (the
+  ///     point is NOT saved); if GPS fails, the last local location, else
+  ///     the "Where should we deliver?" screen.
+  /// Only [LocationService] is touched here - [_onLocationChanged] is the
+  /// single place that applies a location to the page.
   Future<void> _initializeHomeData() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     uid = user.uid;
 
+    final location = LocationService.instance;
+    final local = await location.loadLocal();
+
+    var citiesChanged = false;
+    try {
+      citiesChanged = await CitiesService.instance.ensureLoaded();
+    } catch (_) {
+      // Offline with no local copy - nothing can be resolved yet.
+      if (local == null && mounted) {
+        setState(() => _needsLocation = true);
+        _showSnack(TranslationHelper.get('no_internet'));
+      }
+      return;
+    }
+    if (local != null) _onLocationChanged();
+
     Map<String, dynamic>? data;
     try {
-      final userDoc =
-          await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      data = userDoc.data();
+      data =
+          (await FirebaseFirestore.instance.collection('users').doc(uid).get())
+              .data();
     } catch (e) {
-      if (mounted) {
+      // Keep whatever the phone already had; nothing to compare against.
+      if (local == null && mounted) {
+        setState(() => _needsLocation = true);
         _showSnack(TranslationHelper.get(
             isConnectivityError(e) ? 'no_internet' : 'error'));
       }
+      return;
     }
 
     name = data?['name'] ?? '';
     if (mounted) setState(() {});
-    // Only overwrites the cache on an actual successful read - on a
-    // transient fetch failure `data` is null, and blindly calling update()
-    // would wipe out whatever the cache already had (e.g. from an earlier
-    // successful load) to blank name/phone/role instead of just leaving it.
     if (data != null) {
       UserProfileCache.instance.update(
         name: data['name'] as String?,
@@ -164,286 +188,194 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
-    await _checkUserLocation(data?['address'] as Map<String, dynamic>?);
-  }
-
-  /// Uses the already-fetched `address` map as-is - no GPS call here, named
-  /// or not: a "current location" address (unnamed, `location_name` null)
-  /// is resolved once via [_useCurrentLocation] and then just as sticky as
-  /// a named saved address until the user explicitly asks to re-resolve it.
-  /// That keeps every normal app open instant instead of blocking on a
-  /// fresh GPS fix. If there's no usable address yet, this sets
-  /// [_needsLocation], whose prompt offers both a fast path (use current
-  /// location, on demand) and the manual map picker. There is deliberately
-  /// no "skip and see all cities" fallback.
-  Future<void> _checkUserLocation(Map<String, dynamic>? address) async {
-    String? validCity;
-    String? validLocationName;
-    try {
-      final city = address?['city'] as String?;
-      final lat = address?['lat'];
-      final lng = address?['lng'];
-
-      if (city != null && city.isNotEmpty && lat != null && lng != null) {
-        final citySnapshot = await FirebaseFirestore.instance
-            .collection('cities')
-            .where('name', isEqualTo: city)
-            .limit(1)
-            .get();
-        if (citySnapshot.docs.isNotEmpty) {
-          validCity = city;
-          validLocationName = address?['location_name'] as String?;
-        }
-      }
-    } catch (_) {
-      // Any error here falls through to the "add location" prompt - there
-      // is no city to silently fall back to.
+    if (citiesChanged) {
+      try {
+        await location.recheckAddresses();
+      } catch (_) {}
     }
 
+    SavedAddress? defaultAddress;
+    try {
+      defaultAddress = await location.fetchDefault(data);
+    } catch (_) {}
     if (!mounted) return;
 
-    if (validCity != null) {
-      setState(() {
-        cityName = validCity;
-        _activeLocationName = validLocationName;
-        _needsLocation = false;
-      });
-      fetchTrendingStores();
-      _loadBannerAndAds(validCity);
-    } else {
+    if (defaultAddress != null) {
+      final active = location.active;
+      if (active == null ||
+          active.addressId != defaultAddress.id ||
+          active.lat != defaultAddress.lat ||
+          active.lng != defaultAddress.lng ||
+          active.cityId != defaultAddress.cityId) {
+        await location.applyDefault(defaultAddress);
+      }
+      _checkMovedCity();
+      return;
+    }
+
+    // default_address_id == "current_location" (fetchDefault returns null
+    // for it), or no usable saved address: read the GPS fresh every start.
+    // If it fails, keep the last location this phone had.
+    final result = await CityResolver.resolveFromDevice();
+    if (!mounted) return;
+    if (result.status == CityResolveStatus.resolved) {
+      await location.useUnsaved(
+          lat: result.lat!, lng: result.lng!, cityId: result.cityId!);
+    } else if (location.active == null) {
       setState(() => _needsLocation = true);
     }
   }
 
-  Future<void> _openSelectMap({required bool canCancel}) async {
+  /// Follows [LocationService] - every location change (home start, the
+  /// picker, a new address, checkout, the moved-city banner) lands here.
+  void _onLocationChanged() {
     if (!mounted) return;
-    final result = await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => SelectMapPage(widget.language, canCancel: canCancel),
-      ),
-    );
-    if (mounted && result is Map && result['city'] != null) {
-      final newCity = result['city'] as String;
-      setState(() {
-        cityName = newCity;
-        _activeLocationName = null;
-        _needsLocation = false;
-      });
-      fetchTrendingStores();
-      _loadBannerAndAds(newCity);
+    final active = LocationService.instance.active;
+    if (active == null) {
+      // E.g. the active saved address was deleted / left every city.
+      if (CitiesService.instance.isLoaded && uid.isNotEmpty) {
+        _statusSub?.cancel();
+        setState(() {
+          _cityId = null;
+          _needsLocation = true;
+        });
+      }
+      return;
+    }
+    final pointChanged =
+        active.lat != _activeLat || active.lng != _activeLng;
+    _activeLat = active.lat;
+    _activeLng = active.lng;
+    if (active.cityId != _cityId) {
+      _activateCity(active.cityId);
+    } else {
+      setState(() {});
+      // Same city, new point: the too-far filter depends on the point.
+      if (pointChanged && _serviceStopMessage == null && _feedCityId != null) {
+        _loadStores(reset: true);
+      }
     }
   }
 
-  /// Opens the saved-address list (see [LocationPickerSheet]). Picking a
-  /// saved address makes it the active, named `address` (no more live GPS
-  /// re-check on future loads); "+ Add address" hands off to
-  /// [_addNewAddress] to pick a new point on the map and name it.
-  Future<void> _openLocationPicker() async {
-    if (uid.isEmpty) {
-      _openSelectMap(canCancel: true);
-      return;
-    }
+  /// Set when the active city isn't taking orders - its stop reason (+
+  /// reopen time), or "no service right now". Replaces the feed; the
+  /// header's location switcher still works.
+  String? _serviceStopMessage;
+  StreamSubscription<CityStatus>? _statusSub;
 
-    final result = await showModalBottomSheet<Object?>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => LocationPickerSheet(
-        uid: uid,
-        language: widget.language,
-        activeCity: cityName,
-        activeLocationName: _activeLocationName,
-      ),
+  /// The city whose feed is currently loaded (null while it isn't).
+  String? _feedCityId;
+
+  void _activateCity(String cityId) {
+    setState(() {
+      _cityId = cityId;
+      _needsLocation = false;
+      _serviceStopMessage = null;
+      if (_movedCitySuggestion?.cityId == cityId) _movedCitySuggestion = null;
+      isLoading = true;
+      stores = [];
+      _feedCityId = null;
+    });
+
+    // Live status: a pause or reopen shows up without a restart.
+    _statusSub?.cancel();
+    _statusSub = CitiesService.instance.watchStatus(cityId).listen(
+      (status) {
+        if (!mounted || cityId != _cityId) return;
+        final message = status.message(widget.language);
+        if (message != null) {
+          setState(() {
+            _serviceStopMessage = message;
+            isLoading = false;
+            _feedCityId = null;
+          });
+          return;
+        }
+        if (_serviceStopMessage != null || _feedCityId != cityId) {
+          setState(() => _serviceStopMessage = null);
+          _feedCityId = cityId;
+          _loadStores(reset: true);
+          _loadBannerAndAds(cityId);
+        }
+      },
+      // Offline: keep showing the last known state - never flash
+      // "no service" just because the network dropped.
+      onError: (Object e) {
+        if (!mounted || cityId != _cityId || _feedCityId == cityId) return;
+        setState(() => isLoading = false);
+        _showSnack(TranslationHelper.get(
+            isConnectivityError(e) ? 'no_internet' : 'error'));
+      },
     );
+  }
 
-    if (!mounted || result == null) return;
+  /// "You seem to be in {city}" - set by [_checkMovedCity].
+  CityResolveResult? _movedCitySuggestion;
+  bool _movedCityChecked = false;
 
-    if (result == 'add') {
-      await _addNewAddress();
+  /// Once per session, after starting from a saved address: if the device
+  /// is in a different city that's taking orders, suggest switching. Never
+  /// asks for location permission and never switches by itself.
+  Future<void> _checkMovedCity() async {
+    if (_movedCityChecked) return;
+    _movedCityChecked = true;
+
+    final result =
+        await CityResolver.resolveFromDevice(requestPermission: false);
+    if (!mounted ||
+        result.status != CityResolveStatus.resolved ||
+        result.cityId == LocationService.instance.cityId) {
       return;
     }
-
-    if (result == 'current') {
-      await _useCurrentLocation();
+    try {
+      final status = await CitiesService.instance.fetchStatus(result.cityId!);
+      if (!status.active) return;
+    } catch (_) {
       return;
     }
+    if (!mounted || result.cityId == LocationService.instance.cityId) return;
+    setState(() => _movedCitySuggestion = result);
+  }
 
-    if (result is Map) {
-      final city = result['city'] as String?;
-      if (city == null || city.isEmpty) return;
-      final locationName = result['name'] as String?;
-
-      await FirebaseFirestore.instance.collection('users').doc(uid).set({
-        'address': {
-          'location_name': locationName,
-          'lat': result['lat'],
-          'lng': result['lng'],
-          'city': city,
-        },
-      }, SetOptions(merge: true));
-
-      if (!mounted) return;
-      setState(() {
-        cityName = city;
-        _activeLocationName = locationName;
-        _needsLocation = false;
-      });
-      fetchTrendingStores();
-      _loadBannerAndAds(city);
+  /// "Switch" on the banner: browse where the device is (not saved) and
+  /// make "current location" the default.
+  Future<void> _acceptMovedCity() async {
+    final suggestion = _movedCitySuggestion;
+    if (suggestion == null) return;
+    setState(() => _movedCitySuggestion = null);
+    try {
+      await LocationService.instance.useCurrentAsDefault(
+          lat: suggestion.lat!,
+          lng: suggestion.lng!,
+          cityId: suggestion.cityId!);
+    } catch (e) {
+      _showSnack(TranslationHelper.get(
+          isConnectivityError(e) ? 'no_internet' : 'error'));
     }
   }
 
-  /// On-demand GPS resolve (see [CityResolver]) - only runs when the user
-  /// explicitly asks for it (the "needs location" screen's fast-path button,
-  /// or the picker sheet's "Use current location" row), never automatically
-  /// on app open. Success makes it the active, unnamed address; failure
-  /// shows an inline message instead of blocking the whole page.
+  Future<void> _openLocationPicker() =>
+      AddressFlow.openPicker(context, widget.language);
+
+  /// "Where should we deliver?" - [Use my location].
   Future<void> _useCurrentLocation() async {
     if (_locatingCurrentPosition) return;
     setState(() => _locatingCurrentPosition = true);
-
-    final result = await CityResolver.resolveFromDevice();
-
-    if (!mounted) return;
-    setState(() => _locatingCurrentPosition = false);
-
-    switch (result.status) {
-      case CityResolveStatus.resolved:
-        final city = result.city!;
-        if (uid.isNotEmpty) {
-          await FirebaseFirestore.instance.collection('users').doc(uid).set({
-            'address': {
-              'location_name': null,
-              'lat': result.lat,
-              'lng': result.lng,
-              'city': city,
-            },
-          }, SetOptions(merge: true));
-        }
-        if (!mounted) return;
-        setState(() {
-          cityName = city;
-          _activeLocationName = null;
-          _needsLocation = false;
-        });
-        fetchTrendingStores();
-        _loadBannerAndAds(city);
-        break;
-      case CityResolveStatus.outOfZone:
-        _showSnack(TranslationHelper.get('not_in_delivery_zone'),
-            isError: true);
-        break;
-      case CityResolveStatus.unavailable:
-        _showSnack(TranslationHelper.get('location_lookup_failed'),
-            isError: true);
-        break;
-    }
+    await AddressFlow.useCurrentLocation(context, widget.language);
+    if (mounted) setState(() => _locatingCurrentPosition = false);
   }
 
-  /// Picks a point on the map, names it, saves it to
-  /// `users/{uid}/locations` and makes it the active address.
-  Future<void> _addNewAddress() async {
-    if (!mounted) return;
-    final picked = await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => SelectMapPage(widget.language, canCancel: true),
-      ),
-    );
-    if (!mounted || picked is! Map || picked['city'] == null) return;
-
-    final city = picked['city'] as String;
-    final lat = picked['lat'];
-    final lng = picked['lng'];
-
-    final addressName = await _promptAddressName();
-    if (!mounted || addressName == null || addressName.trim().isEmpty) return;
-    final trimmedName = addressName.trim();
-
-    if (uid.isNotEmpty) {
-      // Saving the address to the user's location list and setting it as
-      // the active address are two writes for one action - batched so a
-      // dropped connection between them can't save one without the other
-      // and leave the saved-address list out of sync with the active one.
-      final userRef = FirebaseFirestore.instance.collection('users').doc(uid);
-      final newLocationRef = userRef.collection('locations').doc();
-      final batch = FirebaseFirestore.instance.batch();
-      batch.set(newLocationRef,
-          {'name': trimmedName, 'lat': lat, 'lng': lng, 'city': city});
-      batch.set(
-        userRef,
-        {
-          'address': {
-            'location_name': trimmedName,
-            'lat': lat,
-            'lng': lng,
-            'city': city,
-          },
-        },
-        SetOptions(merge: true),
-      );
-      await batch.commit();
-    }
-
-    if (!mounted) return;
-    setState(() {
-      cityName = city;
-      _activeLocationName = trimmedName;
-      _needsLocation = false;
-    });
-    fetchTrendingStores();
-    _loadBannerAndAds(city);
-  }
-
-  Future<String?> _promptAddressName() {
-    final controller = TextEditingController();
-    final isArabic = widget.language == 'ar';
-    return showDialog<String>(
-      context: context,
-      builder: (context) => Directionality(
-        textDirection: isArabic ? TextDirection.rtl : TextDirection.ltr,
-        child: AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text(TranslationHelper.get('add_address')),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: InputDecoration(
-              hintText: TranslationHelper.get('address_name_hint'),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text(TranslationHelper.get('cancel')),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFFF9800),
-                foregroundColor: Colors.white,
-              ),
-              onPressed: () => Navigator.pop(context, controller.text),
-              child: Text(TranslationHelper.get('save')),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  /// "Where should we deliver?" - [Choose on map]: pin -> label -> SAVED.
+  Future<void> _chooseOnMap() =>
+      AddressFlow.addAddress(context, widget.language);
 
   @override
   void dispose() {
     // Not stopping/flushing AdService here - HomeShell owns that timer's
-    // lifetime now (see home_shell.dart), since this page's own dispose
-    // only fires when the whole shell is torn down anyway (its State stays
-    // alive across tab switches in the shell's IndexedStack), so stopping
-    // it here and starting it there was two places doing the same job.
+    // lifetime (see home_shell.dart).
     WidgetsBinding.instance.removeObserver(this);
+    LocationService.instance.removeListener(_onLocationChanged);
+    _statusSub?.cancel();
     _scrollController.dispose();
     _connectionSub?.cancel();
     super.dispose();
@@ -459,27 +391,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _bannerAdsRequestId = 0;
 
   /// Loads the city's head banner and refreshes the shared ad cache, then
-  /// picks one "home" slot ad and marks it seen. Called whenever the
-  /// resolved city changes (initial location fix or manual city switch).
-  ///
-  /// Guarded with a request id so that if this fires twice in quick
-  /// succession (e.g. a duplicate init call), an older, slower response
-  /// can't land after a newer one and stomp its result.
-  Future<void> _loadBannerAndAds(String city) async {
+  /// picks one "home" slot ad and marks it seen. Guarded with a request id
+  /// so an older, slower response can't land after a newer one.
+  Future<void> _loadBannerAndAds(String cityId) async {
     final requestId = ++_bannerAdsRequestId;
     if (mounted) setState(() => _adsReady = false);
 
-    // Fired together instead of one after the other - neither depends on
-    // the other's result, so there's no reason to pay for both round-trips
-    // in sequence.
-    final bannerFuture = BannerService.fetchForCity(city);
-    final adsRefreshFuture = AdService.instance.refresh(city);
+    final bannerFuture = BannerService.fetchForCity(cityId);
+    final adsRefreshFuture = AdService.instance.refresh(cityId);
     final banner = await bannerFuture;
     await adsRefreshFuture;
     final ad = AdService.instance.nextAdFor('home');
     if (ad != null) AdService.instance.recordView(ad, 'home');
-    // Not starting the flush/refresh timers here - HomeShell already
-    // started them once for the whole session (see home_shell.dart).
 
     if (!mounted || requestId != _bannerAdsRequestId) return;
     setState(() {
@@ -489,100 +412,96 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> fetchTrendingStores() async {
+  static const int _maxStores = 30;
+  int _storesRequestId = 0;
+
+  /// The store feed: start + city_id (+ tag) + trend. Stores beyond their
+  /// max_delivery_km from the active location are HIDDEN; since Firestore
+  /// can't filter by distance, pages keep loading until a page's worth of
+  /// visible stores is collected (or there's no more data), so the feed
+  /// never looks empty while closer stores exist. [reset] starts over
+  /// (new city / point / category / pull-to-refresh).
+  Future<void> _loadStores({required bool reset}) async {
+    final cityId = _cityId;
+    final active = LocationService.instance.active;
+    if (cityId == null || active == null) return;
+    if (!reset && (!hasMoreData || isLoadingMore || stores.length >= _maxStores)) {
+      return;
+    }
     if (!_hasInternetConnection) {
       _showSnack(TranslationHelper.get('no_internet'));
       return;
     }
-    // No city, no query - there's no "show stores from everywhere" fallback.
-    if (cityName == null) return;
 
-    try {
-      setState(() {
+    final requestId = ++_storesRequestId;
+    setState(() {
+      if (reset) {
         isLoading = true;
         stores = [];
         lastDocument = null;
         hasMoreData = true;
-      });
-
-      Query query = FirebaseFirestore.instance
-          .collection("stores")
-          .where("start", isEqualTo: true)
-          .where("city", isEqualTo: cityName);
-      QuerySnapshot querySnapshot =
-          await query.orderBy('trend', descending: true).limit(pageSize).get();
-
-      if (querySnapshot.docs.isNotEmpty) {
-        setState(() {
-          stores = querySnapshot.docs;
-          lastDocument = querySnapshot.docs.last;
-          isLoading = false;
-        });
       } else {
-        setState(() {
-          hasMoreData = false;
-          isLoading = false;
-        });
+        isLoadingMore = true;
       }
+    });
+
+    try {
+      final visible = <DocumentSnapshot>[];
+      var cursor = reset ? null : lastDocument;
+      var more = true;
+      final target = (stores.length + pageSize).clamp(0, _maxStores);
+      while (more && stores.length + visible.length < target) {
+        Query query = FirebaseFirestore.instance
+            .collection('stores')
+            .where('start', isEqualTo: true)
+            .where('city_id', isEqualTo: cityId);
+        if (isSelected != 'all') {
+          query = query.where('tags', arrayContains: isSelected);
+        }
+        query = query.orderBy('trend', descending: true);
+        if (cursor != null) query = query.startAfterDocument(cursor);
+        final snap = await query.limit(pageSize).get();
+        if (snap.docs.isEmpty) {
+          more = false;
+          break;
+        }
+        cursor = snap.docs.last;
+        if (snap.docs.length < pageSize) more = false;
+        for (final doc in snap.docs) {
+          final data = doc.data() as Map<String, dynamic>;
+          if (!CitiesService.instance.isTooFar(data, active.lat, active.lng)) {
+            visible.add(doc);
+          }
+        }
+      }
+
+      // A newer load (city/point/category change) took over.
+      if (!mounted || requestId != _storesRequestId) return;
+      setState(() {
+        stores = [...stores, ...visible].take(_maxStores).toList();
+        lastDocument = cursor;
+        hasMoreData = more && stores.length < _maxStores;
+        isLoading = false;
+        isLoadingMore = false;
+      });
     } catch (e) {
+      if (!mounted || requestId != _storesRequestId) return;
       _showSnack(TranslationHelper.get(
           isConnectivityError(e) ? 'no_internet' : 'error'));
       setState(() {
         isLoading = false;
-      });
-    }
-  }
-
-  Future<void> loadMoreStores() async {
-    if (!hasMoreData || isLoadingMore || stores.length >= 30) return;
-    if (cityName == null) return;
-
-    try {
-      setState(() {
-        isLoadingMore = true;
-      });
-
-      Query query = FirebaseFirestore.instance
-          .collection("stores")
-          .where("start", isEqualTo: true)
-          .where("city", isEqualTo: cityName);
-      QuerySnapshot querySnapshot = await query
-          .orderBy('trend', descending: true)
-          .startAfterDocument(lastDocument!)
-          .limit(pageSize)
-          .get();
-
-      if (querySnapshot.docs.isNotEmpty) {
-        setState(() {
-          stores.addAll(querySnapshot.docs);
-          lastDocument = querySnapshot.docs.last;
-          isLoadingMore = false;
-        });
-      } else {
-        setState(() {
-          hasMoreData = false;
-          isLoadingMore = false;
-        });
-      }
-    } catch (e) {
-      _showSnack(TranslationHelper.get(
-          isConnectivityError(e) ? 'no_internet' : 'error'));
-      setState(() {
         isLoadingMore = false;
       });
     }
   }
 
+  Future<void> loadMoreStores() => _loadStores(reset: false);
+
   Future<void> refreshStores() async {
-    // Fired together - fetchTrendingStores' own Firestore query doesn't
-    // depend on the ads/banner refresh (or vice versa), so there's no
-    // reason to make the pull-to-refresh gesture wait for both in
-    // sequence. _loadBannerAndAds still respects AdService's own staleness
-    // window, so this can't spam Firestore reads on a rapid double-pull.
-    final city = cityName;
+    final cityId = _cityId;
     await Future.wait([
-      fetchTrendingStores(),
-      if (city != null) _loadBannerAndAds(city),
+      _loadStores(reset: true),
+      if (cityId != null) _loadBannerAndAds(cityId),
     ]);
   }
 
@@ -656,7 +575,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 12),
                 TextButton(
-                  onPressed: () => _openSelectMap(canCancel: false),
+                  onPressed: _chooseOnMap,
                   child: Text(
                     TranslationHelper.get('choose_on_map'),
                     style: const TextStyle(
@@ -681,150 +600,243 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           children: [
             _buildHeader(isArabic),
 
-            // Category chips
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              height: 96,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                children: [
-                  _buildCategoryChip(TranslationHelper.get('all'), "all",
-                      Icons.grid_view_rounded),
-                  _buildCategoryChip(TranslationHelper.get('fast food'),
-                      "fast food", Icons.fastfood_rounded),
-                  _buildCategoryChip(TranslationHelper.get('pizza'), "pizza",
-                      Icons.local_pizza_rounded),
-                  _buildCategoryChip(TranslationHelper.get('coffee'), "coffee",
-                      Icons.coffee_rounded),
-                  _buildCategoryChip(TranslationHelper.get('desserts'),
-                      "desserts", Icons.icecream_rounded),
-                  _buildCategoryChip(TranslationHelper.get('burger'), "burger",
-                      Icons.lunch_dining_rounded),
-                  _buildCategoryChip(TranslationHelper.get('shawerma'),
-                      "shawerma", Icons.kebab_dining_rounded),
-                  _buildCategoryChip(TranslationHelper.get('kebab'), "kebab",
-                      Icons.dinner_dining_rounded),
-                  _buildCategoryChip(TranslationHelper.get('fish'), "fish",
-                      Icons.set_meal_rounded),
-                  _buildCategoryChip(TranslationHelper.get('healthy'),
-                      "healthy", Icons.eco_rounded),
-                  _buildCategoryChip(TranslationHelper.get('drinks'), "drinks",
-                      Icons.local_drink_rounded),
-                ],
+            if (_movedCitySuggestion != null) _buildMovedCityBanner(isArabic),
+
+            // City not serviced right now - its stop_reason instead of the
+            // feed. Chips are hidden too, since picking one would query
+            // stores for a city that isn't running.
+            if (_serviceStopMessage != null)
+              Expanded(child: _buildServiceStopped(_serviceStopMessage!))
+            else ...[
+              // Category chips
+              Container(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                height: 96,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  children: [
+                    _buildCategoryChip(TranslationHelper.get('all'), "all",
+                        Icons.grid_view_rounded),
+                    _buildCategoryChip(TranslationHelper.get('fast food'),
+                        "fast food", Icons.fastfood_rounded),
+                    _buildCategoryChip(TranslationHelper.get('pizza'), "pizza",
+                        Icons.local_pizza_rounded),
+                    _buildCategoryChip(TranslationHelper.get('coffee'),
+                        "coffee", Icons.coffee_rounded),
+                    _buildCategoryChip(TranslationHelper.get('desserts'),
+                        "desserts", Icons.icecream_rounded),
+                    _buildCategoryChip(TranslationHelper.get('burger'),
+                        "burger", Icons.lunch_dining_rounded),
+                    _buildCategoryChip(TranslationHelper.get('shawerma'),
+                        "shawerma", Icons.kebab_dining_rounded),
+                    _buildCategoryChip(TranslationHelper.get('kebab'), "kebab",
+                        Icons.dinner_dining_rounded),
+                    _buildCategoryChip(TranslationHelper.get('fish'), "fish",
+                        Icons.set_meal_rounded),
+                    _buildCategoryChip(TranslationHelper.get('healthy'),
+                        "healthy", Icons.eco_rounded),
+                    _buildCategoryChip(TranslationHelper.get('drinks'),
+                        "drinks", Icons.local_drink_rounded),
+                  ],
+                ),
               ),
-            ),
 
-            // Stores list - waits for the banner/ad load too, so the store
-            // grid and the sponsored slots above it appear together instead
-            // of the grid rendering first and the banner/ad shoving it down
-            // a moment later.
-            Expanded(
-              child: (isLoading || !_adsReady)
-                  ? _buildLoadingSkeletons(isArabic)
-                  : stores.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                Icons.lock_clock,
-                                size: 80,
-                                color: Colors.grey[400],
-                              ),
-                              const SizedBox(height: 16),
-                              Text(
-                                TranslationHelper.get('no_stores_available'),
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w500,
+              // Stores list - waits for the banner/ad load too, so the store
+              // grid and the sponsored slots above it appear together instead
+              // of the grid rendering first and the banner/ad shoving it down
+              // a moment later.
+              Expanded(
+                child: (isLoading || !_adsReady)
+                    ? _buildLoadingSkeletons(isArabic)
+                    : stores.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.lock_clock,
+                                  size: 80,
+                                  color: Colors.grey[400],
                                 ),
-                              ),
-                            ],
-                          ),
-                        )
-                      : RefreshIndicator(
-                          color: const Color(0xFFFF9800),
-                          onRefresh: refreshStores,
-                          child: CustomScrollView(
-                            controller: _scrollController,
-                            slivers: [
-                              if (_cityBanner != null)
-                                SliverPadding(
-                                  padding:
-                                      const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                                  sliver: SliverToBoxAdapter(
-                                    child: _buildCityBannerImage(),
+                                const SizedBox(height: 16),
+                                Text(
+                                  TranslationHelper.get('no_stores_available'),
+                                  style: const TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w500,
                                   ),
                                 ),
-                              if (_homeAd != null)
-                                SliverPadding(
-                                  padding:
-                                      const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                                  sliver: SliverToBoxAdapter(
-                                    child: _buildSponsoredAdCard(),
+                              ],
+                            ),
+                          )
+                        : RefreshIndicator(
+                            color: const Color(0xFFFF9800),
+                            onRefresh: refreshStores,
+                            child: CustomScrollView(
+                              controller: _scrollController,
+                              slivers: [
+                                if (_cityBanner != null)
+                                  SliverPadding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                        12, 12, 12, 0),
+                                    sliver: SliverToBoxAdapter(
+                                      child: _buildCityBannerImage(),
+                                    ),
                                   ),
-                                ),
-                              SliverPadding(
-                                padding: const EdgeInsets.all(12),
-                                sliver: SliverGrid(
-                                  gridDelegate: storeGridDelegate,
-                                  delegate: SliverChildBuilderDelegate(
-                                    (context, storeIndex) {
-                                      var store = stores[storeIndex].data()
-                                          as Map<String, dynamic>;
-                                      String name =
-                                          store['name_${widget.language}'] ??
-                                              'Unknown Store';
-                                      String namear =
-                                          store['name_ar'] ?? 'Unknown Store';
-                                      String namefr =
-                                          store['name_fr'] ?? 'Unknown Store';
-                                      String isOpen =
-                                          store['status'] ?? "close";
-                                      String imageUrl = store['image'] ??
-                                          'https://via.placeholder.com/150';
-                                      int rateNumbers =
-                                          store['rate_numbers'] ?? 0;
-                                      double rating = (rateNumbers <= 100)
-                                          ? 0
-                                          : (store['rate'] ?? 0).toDouble();
-                                      int? deliveryMinutes =
-                                          (store['estimated_delivery_time']
-                                                  as num?)
-                                              ?.toInt();
+                                if (_homeAd != null)
+                                  SliverPadding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                        12, 12, 12, 0),
+                                    sliver: SliverToBoxAdapter(
+                                      child: _buildSponsoredAdCard(),
+                                    ),
+                                  ),
+                                SliverPadding(
+                                  padding: const EdgeInsets.all(12),
+                                  sliver: SliverGrid(
+                                    gridDelegate: storeGridDelegate,
+                                    delegate: SliverChildBuilderDelegate(
+                                      (context, storeIndex) {
+                                        var store = stores[storeIndex].data()
+                                            as Map<String, dynamic>;
+                                        String name =
+                                            store['name_${widget.language}'] ??
+                                                'Unknown Store';
+                                        String namear =
+                                            store['name_ar'] ?? 'Unknown Store';
+                                        String namefr =
+                                            store['name_fr'] ?? 'Unknown Store';
+                                        String isOpen =
+                                            store['status'] ?? "close";
+                                        String imageUrl = store['image'] ??
+                                            'https://via.placeholder.com/150';
+                                        int rateNumbers =
+                                            store['rate_numbers'] ?? 0;
+                                        double rating = (rateNumbers <= 100)
+                                            ? 0
+                                            : (store['rate'] ?? 0).toDouble();
+                                        int? deliveryMinutes =
+                                            (store['estimated_delivery_time']
+                                                    as num?)
+                                                ?.toInt();
 
-                                      return _buildStoreCard(
-                                        context,
-                                        name,
-                                        isOpen,
-                                        imageUrl,
-                                        rateNumbers,
-                                        rating,
-                                        deliveryMinutes,
-                                        stores[storeIndex].id,
-                                        namear,
-                                        namefr,
-                                      );
-                                    },
-                                    childCount: stores.length,
-                                  ),
-                                ),
-                              ),
-                              if (isLoadingMore)
-                                const SliverToBoxAdapter(
-                                  child: Padding(
-                                    padding: EdgeInsets.all(16.0),
-                                    child: Center(
-                                      child: CircularProgressIndicator(
-                                        color: Color(0xFFFF9800),
-                                      ),
+                                        return _buildStoreCard(
+                                          context,
+                                          name,
+                                          isOpen,
+                                          imageUrl,
+                                          rateNumbers,
+                                          rating,
+                                          deliveryMinutes,
+                                          stores[storeIndex].id,
+                                          namear,
+                                          namefr,
+                                        );
+                                      },
+                                      childCount: stores.length,
                                     ),
                                   ),
                                 ),
-                            ],
+                                if (isLoadingMore)
+                                  const SliverToBoxAdapter(
+                                    child: Padding(
+                                      padding: EdgeInsets.all(16.0),
+                                      child: Center(
+                                        child: CircularProgressIndicator(
+                                          color: Color(0xFFFF9800),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
                           ),
-                        ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// "You seem to be in {city} - switch?" (see [_checkMovedCity]).
+  Widget _buildMovedCityBanner(bool isArabic) {
+    final city = CitiesService.instance
+        .cityName(_movedCitySuggestion!.cityId, widget.language);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF3E0),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFFFD8A8)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.near_me_rounded,
+                color: Color(0xFFFF9800), size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                TranslationHelper.get('moved_city_message', {'city': city}),
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF2E3A59),
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: _acceptMovedCity,
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFFFF9800),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+              ),
+              child: Text(
+                TranslationHelper.get('switch_city'),
+                style: const TextStyle(fontWeight: FontWeight.w800),
+              ),
+            ),
+            IconButton(
+              onPressed: () => setState(() => _movedCitySuggestion = null),
+              icon: const Icon(Icons.close, size: 18, color: Color(0xFF9AA1AC)),
+              visualDensity: VisualDensity.compact,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildServiceStopped(String message) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 88,
+              height: 88,
+              decoration: const BoxDecoration(
+                color: Color(0xFFFFF3E0),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.pause_circle_outline_rounded,
+                  size: 40, color: Color(0xFFFF9800)),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF2E3A59),
+                height: 1.4,
+              ),
             ),
           ],
         ),
@@ -863,7 +875,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   const SizedBox(width: 6),
                   Flexible(
                     child: Text(
-                      cityName ?? TranslationHelper.get('delivery_location'),
+                      _headerLabel(),
                       style: const TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.w700,
@@ -947,6 +959,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  /// The saved address's label (+ city), "Current location" (+ city) for
+  /// the unsaved GPS one, or a placeholder while nothing is resolved yet.
+  String _headerLabel() {
+    final active = LocationService.instance.active;
+    if (active == null) return TranslationHelper.get('delivery_location');
+    final city =
+        CitiesService.instance.cityName(active.cityId, widget.language);
+    final label = active.label ?? TranslationHelper.get('current_location');
+    return city.isEmpty ? label : '$label · $city';
+  }
+
   Widget _buildCityBannerImage() {
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
@@ -997,7 +1020,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         onTap: () {
           if (isSelected != type) {
             setState(() => isSelected = type);
-            ddd();
+            _loadStores(reset: true);
           }
         },
         child: Column(
@@ -1038,56 +1061,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
     );
-  }
-
-  Future<void> ddd() async {
-    if (cityName == null) return;
-    if (_hasInternetConnection == true) {
-      try {
-        setState(() {
-          isLoading = true;
-          stores = [];
-          lastDocument = null;
-          hasMoreData = true;
-        });
-        // Get first batch of trending stores
-        Query query = FirebaseFirestore.instance
-            .collection("stores")
-            .where("start", isEqualTo: true)
-            .where("city", isEqualTo: cityName);
-        if (isSelected != "all") {
-          query = query.where("tags", arrayContains: isSelected);
-        }
-        QuerySnapshot querySnapshot = await query
-            .orderBy('trend', descending: true)
-            .limit(pageSize)
-            .get();
-
-        if (querySnapshot.docs.isNotEmpty) {
-          setState(() {
-            stores = querySnapshot.docs;
-            lastDocument = querySnapshot.docs.last;
-            isLoading = false;
-          });
-        } else {
-          setState(() {
-            hasMoreData = false;
-            isLoading = false;
-          });
-        }
-      } catch (e) {
-        _showSnack(TranslationHelper.get(
-            isConnectivityError(e) ? 'no_internet' : 'error'));
-        setState(() {
-          isLoading = false;
-        });
-      }
-    } else {
-      _showSnack(TranslationHelper.get('no_internet'));
-      setState(() {
-        isLoading = false;
-      });
-    }
   }
 
   Widget _buildStoreCard(

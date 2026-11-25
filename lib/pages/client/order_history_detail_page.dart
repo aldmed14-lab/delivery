@@ -4,7 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/pages/client/cart_page.dart';
 import 'package:flutter_application_1/pages/shared/help_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/order_reorder_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
@@ -140,7 +140,8 @@ class _OrderHistoryDetailPageState extends State<OrderHistoryDetailPage>
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) => HelpPage(widget.language, orderId: widget.orderId),
+                builder: (_) =>
+                    HelpPage(widget.language, orderId: widget.orderId),
               ),
             ),
             child: Container(

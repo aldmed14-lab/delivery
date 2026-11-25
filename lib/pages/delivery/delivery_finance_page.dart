@@ -4,7 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
@@ -25,7 +25,13 @@ class DeliveryFinancePage extends StatefulWidget {
   State<DeliveryFinancePage> createState() => _DeliveryFinancePageState();
 }
 
-class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCardMixin {
+class _DeliveryFinancePageState extends State<DeliveryFinancePage>
+    with AlertCardMixin {
+  // Mirrors MIN_WITHDRAW_AMOUNT in requestDeliveryWithdraw.js - checked here
+  // too so the dialog can reject it immediately instead of round-tripping
+  // to the server first for something this cheap to catch locally.
+  static const _minWithdrawAmount = 1000;
+
   final _firestore = FirebaseFirestore.instance;
   final _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
@@ -65,7 +71,8 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
   /// moment either happens while the driver is looking at it.
   void _listenDelivery() {
     _deliverySub?.cancel();
-    _deliverySub = _firestore.collection('delivery').doc(_uid).snapshots().listen((snap) {
+    _deliverySub =
+        _firestore.collection('delivery').doc(_uid).snapshots().listen((snap) {
       if (!mounted) return;
       final delivery = snap.data() ?? {};
       setState(() {
@@ -151,12 +158,32 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
   }
 
   static const _frMonths = [
-    'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
-    'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
+    'janvier',
+    'février',
+    'mars',
+    'avril',
+    'mai',
+    'juin',
+    'juillet',
+    'août',
+    'septembre',
+    'octobre',
+    'novembre',
+    'décembre',
   ];
   static const _arMonths = [
-    'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
-    'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر',
+    'يناير',
+    'فبراير',
+    'مارس',
+    'أبريل',
+    'مايو',
+    'يونيو',
+    'يوليو',
+    'أغسطس',
+    'سبتمبر',
+    'أكتوبر',
+    'نوفمبر',
+    'ديسمبر',
   ];
 
   String _formatDate(Timestamp? ts) {
@@ -179,7 +206,8 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
 
   Future<void> _showWithdrawDialog() async {
     if (!_deliveryActive) {
-      showAlert(TranslationHelper.get('delivery_inactive_action_blocked'), isError: true);
+      showAlert(TranslationHelper.get('delivery_inactive_action_blocked'),
+          isError: true);
       return;
     }
     final controller = TextEditingController();
@@ -192,7 +220,8 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
         builder: (context, setDialogState) => Directionality(
           textDirection: _isArabic ? TextDirection.rtl : TextDirection.ltr,
           child: Dialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
             child: Padding(
               padding: const EdgeInsets.all(20),
               child: Column(
@@ -209,17 +238,23 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    TranslationHelper.get('finance_withdraw_available_balance',
-                        {'amount': _balance.toStringAsFixed(0), 'currency': currency}),
-                    style: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA1AC)),
+                    TranslationHelper.get(
+                        'finance_withdraw_available_balance', {
+                      'amount': _balance.toStringAsFixed(0),
+                      'currency': currency
+                    }),
+                    style: const TextStyle(
+                        fontSize: 12.5, color: Color(0xFF9AA1AC)),
                   ),
                   const SizedBox(height: 14),
                   TextField(
                     controller: controller,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
                     autofocus: true,
                     decoration: InputDecoration(
-                      hintText: TranslationHelper.get('finance_withdraw_amount_hint'),
+                      hintText:
+                          TranslationHelper.get('finance_withdraw_amount_hint'),
                       errorText: errorText,
                       suffixText: currency,
                       border: OutlineInputBorder(
@@ -256,13 +291,21 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
                             final amount = double.tryParse(
                                 controller.text.trim().replaceAll(',', '.'));
                             if (amount == null || amount <= 0) {
-                              setDialogState(
-                                  () => errorText = TranslationHelper.get('invalid_amount'));
+                              setDialogState(() => errorText =
+                                  TranslationHelper.get('invalid_amount'));
+                              return;
+                            }
+                            if (amount < _minWithdrawAmount) {
+                              setDialogState(() => errorText =
+                                  TranslationHelper.get(
+                                      'finance_withdraw_below_minimum',
+                                      {'min': _minWithdrawAmount}));
                               return;
                             }
                             if (amount > _balance) {
-                              setDialogState(() => errorText = TranslationHelper.get(
-                                  'finance_withdraw_amount_exceeds_balance'));
+                              setDialogState(() => errorText =
+                                  TranslationHelper.get(
+                                      'finance_withdraw_amount_exceeds_balance'));
                               return;
                             }
                             Navigator.pop(context, true);
@@ -297,7 +340,9 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
     if (amount == null) return;
 
     try {
-      await FirebaseFunctions.instance.httpsCallable('requestDeliveryWithdraw').call({
+      await FirebaseFunctions.instance
+          .httpsCallable('requestDeliveryWithdraw')
+          .call({
         'amount': amount,
       });
       if (mounted) {
@@ -308,7 +353,20 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
       }
     } catch (e) {
       if (mounted) {
-        showAlert(TranslationHelper.get(_withdrawErrorKey(e)), isError: true);
+        // The dialog's own check above already catches this locally, but the
+        // server re-checks it too (never trust a client-only guard) - same
+        // {min} substitution, just reached over a slower path.
+        if (e is FirebaseFunctionsException &&
+            (e.details is Map ? e.details['code'] : null) ==
+                'withdraw_below_minimum') {
+          showAlert(
+            TranslationHelper.get(
+                'finance_withdraw_below_minimum', {'min': _minWithdrawAmount}),
+            isError: true,
+          );
+        } else {
+          showAlert(TranslationHelper.get(_withdrawErrorKey(e)), isError: true);
+        }
       }
     }
   }
@@ -391,7 +449,8 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
   Widget _buildHeader() {
     return Container(
       width: double.infinity,
-      padding: EdgeInsets.fromLTRB(16, MediaQuery.of(context).padding.top + 12, 16, 16),
+      padding: EdgeInsets.fromLTRB(
+          16, MediaQuery.of(context).padding.top + 12, 16, 16),
       color: const Color(0xFF1B2A4A),
       child: Row(
         textDirection: _isArabic ? TextDirection.rtl : TextDirection.ltr,
@@ -407,7 +466,9 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
                 shape: BoxShape.circle,
               ),
               child: Icon(
-                _isArabic ? Icons.arrow_forward_ios_rounded : Icons.arrow_back_ios_new_rounded,
+                _isArabic
+                    ? Icons.arrow_forward_ios_rounded
+                    : Icons.arrow_back_ios_new_rounded,
                 size: 16,
                 color: Colors.white,
               ),
@@ -513,7 +574,8 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
                 ),
                 child: Text(
                   TranslationHelper.get('finance_request_withdraw_button'),
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+                  style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w800),
                 ),
               ),
             ),
@@ -601,7 +663,8 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
     final number = t['transaction_number'] as String? ?? '';
     final currency = TranslationHelper.get('currency_unit');
     final isCredit = _isCredit(type);
-    final amountColor = isCredit ? const Color(0xFF1B8A3E) : const Color(0xFFE74C3C);
+    final amountColor =
+        isCredit ? const Color(0xFF1B8A3E) : const Color(0xFFE74C3C);
     final sign = isCredit ? '+' : '-';
 
     return Container(
@@ -658,7 +721,8 @@ class _DeliveryFinancePageState extends State<DeliveryFinancePage> with AlertCar
               Expanded(
                 child: Text(
                   _formatDate(t['created_at'] as Timestamp?),
-                  style: const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC)),
+                  style:
+                      const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC)),
                 ),
               ),
               Text(

@@ -1,9 +1,15 @@
+import 'dart:io';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:uuid/uuid.dart';
 
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
+import 'package:flutter_application_1/utils/cities_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 import 'package:flutter_application_1/widgets/discard_changes_dialog.dart';
@@ -47,18 +53,23 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
 
   bool _isLoading = true;
   bool _isSaving = false;
+  bool _isUploadingImage = false;
   Object? _loadError;
   String _image = '';
   final Set<String> _selectedTags = {};
   double? _lat;
   double? _lng;
   String _locationName = '';
+  /// stores.city_id - fixed (set by the admin page); a pin edit can't move
+  /// the store to another city.
+  String _storeCityId = '';
 
   // Snapshot of what's actually saved, so a stray back-tap with unsaved
   // edits can be caught instead of silently discarding them - refreshed
   // both right after _load() and after a successful _save().
   String _savedNameFr = '';
   String _savedNameAr = '';
+  String _savedImage = '';
   int _savedMinOrder = 0;
   Set<String> _savedTags = {};
   double? _savedLat;
@@ -103,11 +114,12 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
         _image = data['image'] as String? ?? '';
         _selectedTags
           ..clear()
-          ..addAll(((data['tags'] as List?) ?? const [])
-              .map((t) => t.toString()));
+          ..addAll(
+              ((data['tags'] as List?) ?? const []).map((t) => t.toString()));
         _lat = (data['lat'] as num?)?.toDouble();
         _lng = (data['lng'] as num?)?.toDouble();
         _locationName = data['location_name'] as String? ?? '';
+        _storeCityId = data['city_id'] as String? ?? '';
         _isLoading = false;
         _syncSavedSnapshot();
       });
@@ -123,6 +135,7 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
   void _syncSavedSnapshot() {
     _savedNameFr = _nameFrController.text.trim();
     _savedNameAr = _nameArController.text.trim();
+    _savedImage = _image;
     _savedMinOrder = int.tryParse(_minOrderController.text.trim()) ?? 0;
     _savedTags = Set.of(_selectedTags);
     _savedLat = _lat;
@@ -135,6 +148,7 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
     final minOrder = int.tryParse(_minOrderController.text.trim()) ?? 0;
     return _nameFrController.text.trim() != _savedNameFr ||
         _nameArController.text.trim() != _savedNameAr ||
+        _image != _savedImage ||
         minOrder != _savedMinOrder ||
         _selectedTags.length != _savedTags.length ||
         !_selectedTags.containsAll(_savedTags) ||
@@ -172,11 +186,18 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      // A modal bottom sheet's default drag-to-dismiss listens for vertical
+      // drags anywhere over its content, including the map - so a swipe
+      // meant to pan the map was instead winning the gesture arena and
+      // moving/dismissing the sheet. There's no separate close button, but
+      // tapping the scrim outside the sheet still dismisses it.
+      enableDrag: false,
       builder: (_) => _LocationEditSheet(
         language: widget.language,
         initialLat: _lat,
         initialLng: _lng,
         initialLocationName: _locationName,
+        currentCityId: _storeCityId,
       ),
     );
     if (result == null || !mounted) return;
@@ -185,6 +206,61 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
       _lng = result['lng'] as double?;
       _locationName = result['location_name'] as String? ?? _locationName;
     });
+  }
+
+  /// Same pattern as store_item_edit_page.dart's own `_pickImage`: uploads
+  /// right away (so the preview updates immediately) under a fresh id -
+  /// never a fixed "profile.jpg" path, which would fight the CDN/image
+  /// cache on every re-upload - but only actually lands in Firestore once
+  /// `_save()` commits, same as every other field on this page. The old
+  /// image (if any) is left in Storage rather than deleted here, for the
+  /// same reason: it's still the live value until _save() commits.
+  // Same cap as demande_page.dart's ID/vehicle/store-application photos -
+  // kept consistent across every image upload in the app rather than each
+  // page inventing its own limit.
+  static const _maxImageBytes = 150 * 1024;
+
+  Future<void> _pickImage() async {
+    if (_isUploadingImage) return;
+    final XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 45,
+        maxWidth: 1024,
+      );
+    } catch (e) {
+      showAlert(TranslationHelper.get('error'), isError: true);
+      return;
+    }
+    if (picked == null) return;
+    if (await File(picked.path).length() > _maxImageBytes) {
+      showAlert(TranslationHelper.get('demande_image_too_large'),
+          isError: true);
+      return;
+    }
+
+    setState(() => _isUploadingImage = true);
+    try {
+      final online = await InternetConnectionService().checkNow();
+      if (!online) throw Exception('offline');
+      final ref = FirebaseStorage.instance
+          .ref('stores/${widget.storeId}/profile/${const Uuid().v4()}.jpg');
+      await ref.putFile(File(picked.path));
+      final url = await ref.getDownloadURL();
+      if (!mounted) return;
+      setState(() => _image = url);
+    } catch (e) {
+      if (mounted) {
+        showAlert(
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
+          isError: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isUploadingImage = false);
+    }
   }
 
   Future<void> _save() async {
@@ -201,12 +277,24 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
       await _firestore.collection('stores').doc(widget.storeId).update({
         'name_fr': nameFr,
         'name_ar': _nameArController.text.trim(),
+        'image': _image,
         'tags': _selectedTags.toList(),
         'min_order_price': minOrder,
         if (_lat != null) 'lat': _lat,
         if (_lng != null) 'lng': _lng,
         'location_name': _locationName,
       });
+      // Only after the Firestore write actually lands - _savedImage still
+      // holds the URL that was live before this save. A re-upload already
+      // replaced it in Storage with a new file (see _pickImage), so the old
+      // one is now unreferenced by anything and would otherwise leak
+      // forever. Best-effort: a failed delete just leaves a harmless orphan.
+      if (_savedImage.isNotEmpty && _savedImage != _image) {
+        FirebaseStorage.instance
+            .refFromURL(_savedImage)
+            .delete()
+            .catchError((_) {});
+      }
       _syncSavedSnapshot();
       if (mounted) showAlert(TranslationHelper.get('changes_saved'));
     } catch (e) {
@@ -326,25 +414,28 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
           const SizedBox(width: 10),
           InkWell(
             borderRadius: BorderRadius.circular(20),
-            // No image-upload plumbing (picker + storage) exists in this
-            // project yet - rather than pull in new dependencies unasked,
-            // this is honest about not being wired up yet.
-            onTap: () =>
-                showAlert(TranslationHelper.get('change_image_coming_soon')),
+            onTap: _isUploadingImage ? null : _pickImage,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.18),
                 borderRadius: BorderRadius.circular(20),
               ),
-              child: Text(
-                TranslationHelper.get('change_image_button'),
-                style: const TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
-              ),
+              child: _isUploadingImage
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
+                    )
+                  : Text(
+                      TranslationHelper.get('change_image_button'),
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                      ),
+                    ),
             ),
           ),
         ],
@@ -360,14 +451,27 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
           borderRadius: BorderRadius.circular(16),
           child: AspectRatio(
             aspectRatio: 16 / 9,
-            child: _image.isNotEmpty
-                ? CachedNetworkImage(
-                    imageUrl: _image,
-                    fit: BoxFit.cover,
-                    placeholder: (c, u) => Container(color: Colors.grey[200]),
-                    errorWidget: (c, u, e) => _buildImagePlaceholder(),
-                  )
-                : _buildImagePlaceholder(),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _image.isNotEmpty
+                    ? CachedNetworkImage(
+                        imageUrl: _image,
+                        fit: BoxFit.cover,
+                        placeholder: (c, u) =>
+                            Container(color: Colors.grey[200]),
+                        errorWidget: (c, u, e) => _buildImagePlaceholder(),
+                      )
+                    : _buildImagePlaceholder(),
+                if (_isUploadingImage)
+                  Container(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    child: const Center(
+                      child: CircularProgressIndicator(color: Colors.white),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 22),
@@ -463,8 +567,7 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
       decoration: InputDecoration(
         isDense: true,
         suffixText: suffix,
-        suffixStyle:
-            const TextStyle(fontSize: 12.5, color: Color(0xFF9AA1AC)),
+        suffixStyle: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA1AC)),
         contentPadding: const EdgeInsets.symmetric(vertical: 8),
         border: const UnderlineInputBorder(
             borderSide: BorderSide(color: Color(0xFFEDEFF2))),
@@ -496,9 +599,7 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
         decoration: BoxDecoration(
           color: selected ? const Color(0xFFFF9800) : const Color(0xFFF7F8FA),
           borderRadius: BorderRadius.circular(20),
-          border: selected
-              ? null
-              : Border.all(color: const Color(0xFFE1E4E9)),
+          border: selected ? null : Border.all(color: const Color(0xFFE1E4E9)),
         ),
         child: Text(
           TranslationHelper.get(tag),
@@ -614,23 +715,29 @@ class _StoreInfoEditPageState extends State<StoreInfoEditPage>
 
 /// Self-contained pin-on-map + name editor for the store's own address -
 /// unlike SelectMapPage (built for a *user's delivery* address, tightly
-/// coupled to writing straight into `users/{uid}` and validating against
-/// the `areas`/`cities` polygons), a store's city is already fixed
-/// (`stores.city`, set at onboarding) - this only ever adjusts where
-/// exactly the pin sits and its label, and hands the result back to the
-/// caller rather than saving anything itself, so it's part of the same
-/// single "Enregistrer les modifications" commit as the rest of the form.
+/// coupled to writing straight into `users/{uid}`), a store's city is
+/// already fixed (`stores.city`, set at onboarding) and never gets updated
+/// from here - it only ever adjusts where exactly the pin sits and its
+/// label, and hands the result back to the caller rather than saving
+/// anything itself, so it's part of the same single "Enregistrer les
+/// modifications" commit as the rest of the form. It DOES still validate
+/// against the same city polygons SelectMapPage uses (CitiesService), purely to
+/// block confirming a point outside the store's own serviced city - a
+/// store moving to a different city is a decision for an admin, not
+/// something this form can silently apply.
 class _LocationEditSheet extends StatefulWidget {
   final String language;
   final double? initialLat;
   final double? initialLng;
   final String initialLocationName;
+  final String currentCityId;
 
   const _LocationEditSheet({
     required this.language,
     required this.initialLat,
     required this.initialLng,
     required this.initialLocationName,
+    required this.currentCityId,
   });
 
   @override
@@ -646,7 +753,59 @@ class _LocationEditSheetState extends State<_LocationEditSheet> {
       ? LatLng(widget.initialLat!, widget.initialLng!)
       : _fallbackCenter;
 
+  bool _areasLoaded = false;
+  String? _errorMessage;
+  bool _isChecking = false;
+
   bool get _isArabic => widget.language == 'ar';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAreas();
+  }
+
+  /// Same city polygons SelectMapPage checks against (cached on the phone).
+  Future<void> _loadAreas() async {
+    try {
+      await CitiesService.instance.ensureLoaded();
+    } catch (_) {
+      // No cities -> _confirm finds no city and blocks confirming rather
+      // than silently accepting an unchecked point.
+    } finally {
+      if (mounted) setState(() => _areasLoaded = true);
+    }
+  }
+
+  void _confirm() {
+    if (!_areasLoaded) return;
+    setState(() => _isChecking = true);
+
+    final resolved =
+        CitiesService.instance.resolve(_center.latitude, _center.longitude);
+    if (resolved == null) {
+      setState(() {
+        _isChecking = false;
+        _errorMessage = TranslationHelper.get('city_not_available');
+      });
+      return;
+    }
+    if (widget.currentCityId.isNotEmpty &&
+        resolved.id != widget.currentCityId) {
+      setState(() {
+        _isChecking = false;
+        _errorMessage =
+            TranslationHelper.get('location_city_changed_call_admin');
+      });
+      return;
+    }
+
+    Navigator.of(context).pop({
+      'lat': _center.latitude,
+      'lng': _center.longitude,
+      'location_name': _nameController.text.trim(),
+    });
+  }
 
   @override
   void dispose() {
@@ -659,8 +818,8 @@ class _LocationEditSheetState extends State<_LocationEditSheet> {
     return Directionality(
       textDirection: _isArabic ? TextDirection.rtl : TextDirection.ltr,
       child: Padding(
-        padding: EdgeInsets.only(
-            bottom: MediaQuery.of(context).viewInsets.bottom),
+        padding:
+            EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
         child: Container(
           margin: const EdgeInsets.all(12),
           decoration: BoxDecoration(
@@ -690,7 +849,14 @@ class _LocationEditSheetState extends State<_LocationEditSheet> {
                         child: GoogleMap(
                           initialCameraPosition:
                               CameraPosition(target: _center, zoom: 15),
-                          onCameraMove: (pos) => _center = pos.target,
+                          onCameraMove: (pos) {
+                            _center = pos.target;
+                            // Stale once the pin has moved - re-checked fresh
+                            // on the next confirm tap.
+                            if (_errorMessage != null) {
+                              setState(() => _errorMessage = null);
+                            }
+                          },
                           myLocationButtonEnabled: false,
                           zoomControlsEnabled: false,
                         ),
@@ -720,16 +886,25 @@ class _LocationEditSheetState extends State<_LocationEditSheet> {
                   ),
                 ),
               ),
+              if (_errorMessage != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Text(
+                    _errorMessage!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Color(0xFFE53935),
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
               Padding(
                 padding: const EdgeInsets.all(16),
                 child: SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: () => Navigator.of(context).pop({
-                      'lat': _center.latitude,
-                      'lng': _center.longitude,
-                      'location_name': _nameController.text.trim(),
-                    }),
+                    onPressed: (!_areasLoaded || _isChecking) ? null : _confirm,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFFFF9800),
                       foregroundColor: Colors.white,
@@ -753,3 +928,4 @@ class _LocationEditSheetState extends State<_LocationEditSheet> {
     );
   }
 }
+

@@ -21,7 +21,8 @@ class DirectionsService {
   /// encoded polyline - null if the request failed or returned no route
   /// (no network, no key access to the Directions API, no route found),
   /// so callers can fall back to a straight line instead of showing nothing.
-  static Future<List<LatLng>?> getRoute(LatLng origin, LatLng destination) async {
+  static Future<List<LatLng>?> getRoute(
+      LatLng origin, LatLng destination) async {
     final uri = Uri.https('maps.googleapis.com', '/maps/api/directions/json', {
       'origin': '${origin.latitude},${origin.longitude}',
       'destination': '${destination.latitude},${destination.longitude}',
@@ -31,7 +32,8 @@ class DirectionsService {
     try {
       final response = await http.get(uri).timeout(const Duration(seconds: 10));
       if (response.statusCode != 200) {
-        debugPrint('DirectionsService: HTTP ${response.statusCode} - ${response.body}');
+        debugPrint(
+            'DirectionsService: HTTP ${response.statusCode} - ${response.body}');
         return null;
       }
       final decoded = jsonDecode(response.body) as Map<String, dynamic>;
@@ -97,7 +99,10 @@ class DirectionsService {
     final dLat = _deg2rad(lat2 - lat1);
     final dLng = _deg2rad(lng2 - lng1);
     final a = sin(dLat / 2) * sin(dLat / 2) +
-        cos(_deg2rad(lat1)) * cos(_deg2rad(lat2)) * sin(dLng / 2) * sin(dLng / 2);
+        cos(_deg2rad(lat1)) *
+            cos(_deg2rad(lat2)) *
+            sin(dLng / 2) *
+            sin(dLng / 2);
     final c = 2 * atan2(sqrt(a), sqrt(1 - a));
     return earthRadiusKm * c;
   }

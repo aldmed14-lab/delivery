@@ -1,8 +1,9 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
-import 'package:flutter_application_1/pages/owner/store_orders_page.dart' show OrderCard;
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/pages/owner/store_orders_page.dart'
+    show OrderCard, openChatFor;
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
@@ -251,7 +252,8 @@ class _StoreOrderHistoryPageState extends State<StoreOrderHistoryPage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.history_rounded, size: 48, color: Color(0xFFC9CDD4)),
+              const Icon(Icons.history_rounded,
+                  size: 48, color: Color(0xFFC9CDD4)),
               const SizedBox(height: 12),
               Text(
                 TranslationHelper.get('owner_no_order_history'),
@@ -276,7 +278,8 @@ class _StoreOrderHistoryPageState extends State<StoreOrderHistoryPage>
         onStartPreparing: _noop,
         onMarkReady: _noop,
         onOpenChat: docs[i].data()['conversation_id'] != null
-            ? () => showAlert(TranslationHelper.get('chat_coming_soon'))
+            ? () => openChatFor(context, widget.language,
+                docs[i].data()['conversation_id'] as String)
             : null,
       ),
     );

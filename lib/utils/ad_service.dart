@@ -92,7 +92,7 @@ class AdService {
   List<CachedAd> _cache = [];
   String? _cityDocId;
   Map<String, dynamic> _advertisementPrice = {};
-  String? _lastCityName;
+  String? _lastCityId;
 
   Completer<void>? _refreshInFlight;
   Timer? _flushTimer;
@@ -111,9 +111,8 @@ class AdService {
   /// still resolved server-side at charge time.
   Map<String, dynamic> get advertisementPrice => _advertisementPrice;
 
-  /// Refreshes the shared cache for [cityName] (the plain city name, e.g.
-  /// "Nouadhibou" - matches `users.address.city` / `stores.city` elsewhere
-  /// in the app). If a refresh is already running, waits for that one
+  /// Refreshes the shared cache for the city [cityId] (`cities/{id}` - the
+  /// active location's city). If a refresh is already running, waits for that one
   /// instead of returning early with a stale/empty cache - two callers
   /// racing to load ads (e.g. a duplicate init call) must both see the same
   /// populated result, not have the second one read nothing.
@@ -122,10 +121,10 @@ class AdService {
   /// reads; every other screen that calls it again shortly after (any page
   /// showing an ad slot does, on open) just rides the same cache instead of
   /// re-querying - see [_staleness].
-  Future<void> refresh(String cityName) async {
+  Future<void> refresh(String cityId) async {
     if (_refreshInFlight != null) return _refreshInFlight!.future;
 
-    if (_lastCityName == cityName &&
+    if (_lastCityId == cityId &&
         _lastRefreshAt != null &&
         DateTime.now().difference(_lastRefreshAt!) < _staleness) {
       return;
@@ -133,7 +132,7 @@ class AdService {
 
     final completer = Completer<void>();
     _refreshInFlight = completer;
-    _lastCityName = cityName;
+    _lastCityId = cityId;
     try {
       final uid = FirebaseAuth.instance.currentUser?.uid;
 
@@ -142,16 +141,14 @@ class AdService {
       // sequential Firestore round-trips down to one round-trip's worth of
       // latency (only the `ads` lookup below has a real dependency, on
       // which campaigns turned out eligible).
-      final citySnapFuture = FirebaseFirestore.instance
-          .collection('cities')
-          .where('name', isEqualTo: cityName)
-          .limit(1)
-          .get();
+      final citySnapFuture =
+          FirebaseFirestore.instance.collection('cities').doc(cityId).get();
+      // campaigns.cities holds city ids.
       final campaignsSnapFuture = FirebaseFirestore.instance
           .collection('campaigns')
           .where('active', isEqualTo: true)
           .where('budget', isGreaterThan: 0)
-          .where('cities', arrayContains: cityName)
+          .where('cities', arrayContains: cityId)
           .get();
       final seenSnapFuture = uid != null
           ? FirebaseFirestore.instance
@@ -161,19 +158,18 @@ class AdService {
               .get()
           : null;
 
-      final citySnap = await citySnapFuture;
+      final cityDoc = await citySnapFuture;
 
-      if (citySnap.docs.isEmpty) {
+      if (!cityDoc.exists) {
         _cache = [];
         _cityDocId = null;
         _advertisementPrice = {};
         return;
       }
 
-      final cityDoc = citySnap.docs.first;
       _cityDocId = cityDoc.id;
       _advertisementPrice = Map<String, dynamic>.from(
-        (cityDoc.data()['advertisement_price'] as Map?) ?? const {},
+        (cityDoc.data()?['advertisement_price'] as Map?) ?? const {},
       );
 
       final campaignsSnap = await campaignsSnapFuture;
@@ -345,7 +341,7 @@ class AdService {
 
   void startAutoRefresh({Duration interval = const Duration(minutes: 3)}) {
     _autoRefreshTimer ??= Timer.periodic(interval, (_) {
-      final city = _lastCityName;
+      final city = _lastCityId;
       if (city != null) refresh(city);
     });
   }

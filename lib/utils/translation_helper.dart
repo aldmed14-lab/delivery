@@ -30,7 +30,8 @@ class TranslationHelper {
   // "{name}"-style placeholders in the translated string, e.g.
   // TranslationHelper.get('greeting', {'name': userName}).
   static String get(String key, [Map<String, dynamic>? params]) {
-    String value = _translations?[key] ?? key; // Fallback to the key if not found
+    String value =
+        _translations?[key] ?? key; // Fallback to the key if not found
     if (params != null) {
       params.forEach((placeholder, replacement) {
         value = value.replaceAll('{$placeholder}', replacement.toString());

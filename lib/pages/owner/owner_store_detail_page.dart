@@ -7,7 +7,8 @@ import 'package:flutter_application_1/pages/owner/store_menu_page.dart';
 import 'package:flutter_application_1/pages/owner/store_order_history_page.dart';
 import 'package:flutter_application_1/pages/owner/store_orders_page.dart';
 import 'package:flutter_application_1/pages/owner/store_work_time_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/pages/shared/support_page.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
@@ -93,7 +94,8 @@ class _OwnerStoreDetailPageState extends State<OwnerStoreDetailPage>
       final monthlyData = monthlySnap.data();
       final trendTime = store['trend_time'] as String?;
       final trendLevel = (store['trend_level'] as num?)?.toInt();
-      final isCurrentHour = trendTime != null && trendTime == _hourKey(serverNow);
+      final isCurrentHour =
+          trendTime != null && trendTime == _hourKey(serverNow);
 
       if (!mounted) return;
       setState(() {
@@ -199,7 +201,8 @@ class _OwnerStoreDetailPageState extends State<OwnerStoreDetailPage>
     // `start` gates whether this store is allowed to change its own status
     // at all - a store not yet started/approved can't flip itself "open".
     if (_store!['start'] == false) {
-      showAlert(TranslationHelper.get('store_inactive_action_blocked'), isError: true);
+      showAlert(TranslationHelper.get('store_inactive_action_blocked'),
+          isError: true);
       return;
     }
     final currentStatus = _store!['status'] as String? ?? 'close';
@@ -223,13 +226,12 @@ class _OwnerStoreDetailPageState extends State<OwnerStoreDetailPage>
     );
     if (confirmed != true || !mounted) return;
 
-    // Firestore's offline write cache resolves `.update()` successfully the
-    // moment it's queued locally, WITHOUT actual connectivity - it doesn't
-    // wait for a server round-trip, so `await` below can complete with no
-    // error at all while genuinely offline. That used to mean the shown
-    // status changed (setState only ran after a "successful" await) even
-    // with zero internet, since nothing ever reached the catch block below.
-    // Check real reachability explicitly first, before writing anything.
+    // An offline Firestore write doesn't fail - the Future just doesn't
+    // complete until the connection returns (the write stays queued and is
+    // sent then). So with zero internet the `await` below hangs with no
+    // error and no feedback, and the status change would go through later,
+    // on its own, whenever the connection came back. Check real
+    // reachability explicitly first and say so immediately instead.
     final online = await InternetConnectionService().checkNow();
     if (!online) {
       if (mounted) {
@@ -346,7 +348,8 @@ class _OwnerStoreDetailPageState extends State<OwnerStoreDetailPage>
               borderRadius: BorderRadius.circular(20),
               onTap: _showChangeStatusFlow,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(20),
@@ -601,8 +604,7 @@ class _OwnerStoreDetailPageState extends State<OwnerStoreDetailPage>
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) =>
-                    StoreMenuPage(widget.language, widget.storeId),
+                builder: (_) => StoreMenuPage(widget.language, widget.storeId),
               ),
             ),
           ),
@@ -634,8 +636,12 @@ class _OwnerStoreDetailPageState extends State<OwnerStoreDetailPage>
           _buildMenuRow(
             icon: Icons.support_agent_outlined,
             label: TranslationHelper.get('support_menu_item'),
-            onTap: () =>
-                showAlert(TranslationHelper.get('support_coming_soon')),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => SupportPage(widget.language, audience: 'owner'),
+              ),
+            ),
           ),
         ],
       ),
@@ -679,8 +685,7 @@ class _OwnerStoreDetailPageState extends State<OwnerStoreDetailPage>
             ),
             if (badge != null) ...[
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
                   color: const Color(0xFFFF9800),
                   borderRadius: BorderRadius.circular(20),
@@ -834,10 +839,11 @@ class _ConfirmStatusDialog extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                TranslationHelper.get(
-                    'change_status_confirm_message', {'status': newStatusLabel}),
+                TranslationHelper.get('change_status_confirm_message',
+                    {'status': newStatusLabel}),
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 13.5, color: Color(0xFF677489)),
+                style:
+                    const TextStyle(fontSize: 13.5, color: Color(0xFF677489)),
               ),
               const SizedBox(height: 20),
               Row(

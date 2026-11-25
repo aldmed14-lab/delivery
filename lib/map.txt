@@ -1,6 +1,8 @@
 stores {
     store_id {
-        city
+        city_id            // cities/{id} - written by the admin web page
+        city               // display only
+        max_delivery_km    // optional, overrides the city's
         image
         name_ar
         name_fr
@@ -24,6 +26,14 @@ stores {
         min_order_price
         estimated_prep_time
         created_at
+        member_uids: ["uidA", "uidB"]
+        roles: { uidA: "owner", uidB: "manager" }
+        identification {
+            name
+            card_id
+            card_front_image
+            card_back_image
+        }
         work_time (subcollection) {
             time_id {
                 index
@@ -66,16 +76,6 @@ stores {
                 options []    // {option_id,name_ar, name_fr, price}
             }
         }
-        owners (subcollection) {
-            user_id {
-                user_id
-                role  "owner" | "staff"
-                name
-                phone
-                added_at
-                status          // "active" | "removed"
-            }
-        }
         ratings (subcollection) {
             id {
                 user_id
@@ -89,7 +89,8 @@ stores {
 
 delivery {
     user_id {
-        city
+        city_id            // cities/{id} - the courier-search candidate query filters on it
+        city               // display only
         lat
         lng
         geohash
@@ -121,10 +122,42 @@ delivery {
             card_id
             card_front_image
             card_back_image
+            vehicle_image
         }
         completed_orders
         cancelled_orders
-        payout_balance
+        payout_balance // find-courier system: a driver whose balance has gone below -2000 (owes the platform more than that) is excluded as a candidate ONLY for a "cash_payment" order (lib/map.txt orders.payment_type) - they still collect cash for that order and remit it later, the exact risk this threshold exists to cap, but a non-cash order never puts money in their hands so the balance doesn't matter for it. Filtered in code (needs the order's payment_type, which isn't a field on `delivery` itself to query against), not as a Firestore `where` alongside the geohash tier's own range query (Firestore only allows one range/inequality field per query in general) - applied after the existing city/is_online/active/status/pending_offer/geohash-tier query already narrows the candidate list, same as the already-recorded case
+        created_at
+    }
+}
+
+demandes {
+    demande_id {
+        user_id
+        city_name
+        name
+        phone
+        demande_type // store, delivery
+        card_id
+        card_front_image
+        card_back_image
+        delivery {
+            vehicle_image
+            vehicle_type
+        }
+        store {
+            image
+            name_ar
+            name_fr
+            lat
+            lng
+            geohash
+            location_name
+        }
+
+        status
+        rejected_reason
+        admin_by
         created_at
     }
 }
@@ -139,26 +172,19 @@ users {
         active
         role               // "owner", "delivery"
         cash_payment
-        address {
-            location_name
-            lat            // set by select_map.dart when the user picks a location
-            lng            // set by select_map.dart when the user picks a location      
-            city           
-        }
-        locations (subcollection) {
-            location_id {
-                location_name
+        default_address_id  // a saved address id used for browsing + preselected at checkout, or "current_location" = re-read the device GPS on every home start (lib/note.txt LOCATION SYSTEM)
+        addresses (subcollection) {   // saved, pin-confirmed delivery addresses - max 10 per user (enforced in the app)
+            address_id {
+                label          // "Maison" / "Travail" / custom text
                 lat
                 lng
-                city
+                geohash
+                city_id        // resolved from the point (city polygon) when saved - a hint only, pushOrder re-resolves it
+                last_used_at
+                created_at
             }
         }
-        stores (subcollection) {
-            store_id {
-                image
-                joined_at
-            }
-        }
+        // no saved address -> the device GPS position is used for browsing only, kept on the phone, never saved here
     }
 
     carts (subcollection) {
@@ -208,7 +234,7 @@ orders {
         transaction_id // the users_transactions doc this order was paid through - null for a payment type that never creates one
         order_status            // "placed" | "accepted" | "preparing" | "ready" |"cancelled"
         delivery_status          // "pending" | "assigned" | "arrived_to_store"| "picked_up" | "on_the_way" | "arrived" | "delivered"
-        call_admin  // boolean - set automatically by the courier-search hard cap (find-courier system, no driver after 10 min), OR by the customer's own "Call Admin" button on live_order_page.dart once the order is 30+ min past its estimated window (requestAdminCall Cloud Function) - either way, purely a signal for admin attention, never a kill switch on its own
+        admin_report_id  // the reports/{} doc id, once escalated - set automatically by the courier-search hard cap (find-courier system, no driver after 10 min), OR by the customer's own "Call Admin" button on live_order_page.dart once the order is 30+ min past its estimated window (requestAdminCall Cloud Function) - either way, auto-creates a real report instead of just a dead flag, so it actually surfaces in the admin Reports queue. Never a kill switch on its own
         admin_by
         created_at
         city // denormalized from stores.city the moment the order is accepted (advanceOrderStatus) - find-courier system's candidate query needs an equality field to filter delivery docs by, orders never carried one before this
@@ -234,7 +260,11 @@ orders {
         deduction
         total
         store_address { lat, lng,geohash}
-        user_address { lat, lng }
+        user_address { lat, lng }   // still read by courier offers + live order maps
+        city_id                     // resolved by pushOrder from the delivery point (never from the client)
+        delivery_address {          // full copy of the saved address at order time (address_id + label null = ordered to the current GPS location, not saved)
+            address_id, label, lat, lng, geohash, city_id
+        }
         notes
         order_number
         order_end
@@ -324,6 +354,7 @@ idempotency_keys {
 
 client_transactions {
     transaction_id {
+        name // only set for type="withdraw" (requestStoreWithdraw.js: store.name_fr / requestDeliveryWithdraw.js: users/{uid}.name) - denormalized so a withdrawals queue can show who it's for without a second lookup by transactioner_id. null/absent for every other type.
         transaction_number
         transactioner_type // "store" | "delivery"
         transactioner_id
@@ -332,7 +363,8 @@ client_transactions {
         credit_before
         credit_after
         amount
-        status                  // "pending" | "completed" | "failed"
+        status                  // "pending" | "processing" |"completed" | "failed"
+        admin_by
         created_at
     }
 }
@@ -341,8 +373,17 @@ reports {
     report_id {
         created_at
         updated_at
-        report_type // "user_store", "user_delivery", "user_order", "delivery_store", "delivery_user", "store_delivery", "system_user", "system_delivery"
-        // user_system: a user disputing something the system itself did (an unrecognized transaction, a deduction they don't understand) - not a store/delivery/other-user complaint
+        report_type // named reporter_reported - a user is the only reporter this app actually has today (help_page.dart), so those come first:
+        // "user_order" - order not received (help_q_order_not_received)
+        // "user_store" - missing items / any other order problem (help_q_order_missing, help_q_order_problem)
+        // "user_system" - a user disputing something the system itself did: an unrecognized/wrong transaction, a deduction they don't understand, a refund that never arrived - not a store/delivery/other-user complaint
+        // not yet reachable by any code - reserved for a future store/delivery-side reporter:
+        // "user_delivery", "delivery_store", "delivery_user", "store_delivery", "system_delivery"
+        reason // the specific complaint, shown as the report's title (help_report_reason_$reason) - report_type stays the coarse reporter/reported pair above, this is the actual category an admin/user reads:
+        // "order_not_received" | "items_missing" | "order_problem" | "refund_not_received" | "tx_not_mine" | "tx_deduction" | "tx_error"
+        // "order_delayed" - auto-created by requestAdminCall.js (the customer's own "Call Admin" button)
+        // "no_driver_found" - auto-created by courierSearch.js's runHardCapCheck (10-min hard cap, no driver found) - reporter is the order's own user_id, not the caller (there is no caller, it's a scheduled task)
+        // absent on a report created before this field existed - falls back to help_report_type_$report_type
         reported
         reporter
         city_id
@@ -359,39 +400,55 @@ reports {
 
 payment_types {
     payment_id {
-        name
+        name_fr
         name_ar
-        image
         cities []
         active
+        monthly (subcollection) { // written by advanceDeliveryStatus.js at order completion - only when order.payment_type is this doc's own id (an external provider), never for "cash_payment"/"wallet_balance"
+            month // "YYYY-MM" {
+                month
+                total_use // FieldValue.increment(1) per completed order paid through this provider
+                total_revenue // FieldValue.increment(order.total)
+            }
+        }
     }
 }
 
 cities {
     city_id {
         city_code  // string
-        cmd_counter
-        trs_counter
-        name
+        name_ar
+        name_fr
+        polygon [ {lat, lng} ]   // the city's delivery area - a point inside it = this city. Polygons must not overlap
+        bbox { min_lat, max_lat, min_lng, max_lng }   // computed from polygon on every save, never typed by hand
+        max_delivery_km          // optional: longest store -> address distance (absent = no limit); a store can override it
         service_fee
         delivery_fee
         km_fee
         rain
         rain_fee
         cash_payment
-        active            // false = not servicable, even if a matching area polygon exists and contains the point
         advertisement_price {
         "home":   { view_price: 10, click_price: 50 },
         "search": { view_price: 5,  click_price: 30 },
         "store_top10":  { view_price: 3,  click_price: 20 }
         "store":  { view_price: 3,  click_price: 20 }
-        "carts_list":   { view_price: 10, click_price: 50 },
-        "store_daitails":   { view_price: 10, click_price: 50 },
-        "orders_list":   { view_price: 10, click_price: 50 },
         "live_order":   { view_price: 10, click_price: 50 },
-        "histories_list":   { view_price: 10, click_price: 50 },
         }
-        
+        status (subcollection) {
+            current {           // the only city doc the app listens to live
+                active          // false = service paused in this city
+                stop_reason_ar
+                stop_reason_fr
+                reopen_at       // optional -> "back at 18:00"
+            }
+        }
+        counters (subcollection) {
+            current {           // server only - never readable by the app
+                cmd_counter     // orders.order_number
+                trs_counter     // transaction numbers
+            }
+        }
     }
 }
 
@@ -469,6 +526,26 @@ platform_analytics {
                 total_revenue
             }
         }
+        // NOT BUILT YET - planned for the admin web app's Finance page
+        // (lib/note.txt): a city-scoped admin (admins.cities[] non-empty)
+        // has no way to see finance without this, and cities differ on
+        // service_fee/delivery_fee/km_fee so profitability genuinely
+        // varies per city. Same shape as the top-level fields/subcollections
+        // above, just one per city - populated in advanceDeliveryStatus.js
+        // right next to the existing platform_analytics/global write (it
+        // already has cityDoc/cityData in scope there).
+        cities (subcollection) {
+            city_id {
+                platform_earning
+                total_orders
+                total_canceled
+                completed_orders
+                total_revenue
+                yearly (subcollection) { year { year, total_orders, total_revenue, completed_orders, total_canceled } }
+                monthly (subcollection) { month { month, total_orders, completed_orders, total_canceled, total_revenue } }
+                daily (subcollection) { day { day, total_orders, completed_orders, total_canceled, total_revenue } }
+            }
+        }
     }
 }
 
@@ -478,7 +555,7 @@ conversations {
         participants: [uidA, uidB]
         last_read: { uidA: <ts>, uidB: <ts> }
         order_id // not null if is order conversation
-        status            // "open" | "closed" 
+        status            // "open" | "closed"
         category          // "order_issue" | "payment" | "delivery" | "call_admin"
         created_at
         messages (subcollection) {
@@ -517,7 +594,7 @@ promotions {
 }
 
 banner {
-    city_name {
+    city_id {
         image
         active
     }
@@ -646,6 +723,8 @@ system {
     config {
         android_version
         ios_version
+        android_applink
+        ios_applink
     }
     server_time_probe {
         t // FieldValue.serverTimestamp() - written+immediately read back by any client that needs the real backend clock (no direct "server now" read on the client SDK); shared/overwritten by every caller, not one doc per view. See owner_store_detail_page.dart _fetchServerTime.
@@ -658,18 +737,20 @@ admins {
         phone
         email
         is_online
-        role: "super" | "ops" | "finance"
-        cities []          // city_ids this admin has access to; empty/absent = all cities
-        permissions: {
-            "manage_users": true
-            "manage_stores": true
-            "manage_orders": true
-            "manage_delivery": false
-            "manage_ads": false
-            "manage_finance": false
-        }
+        role: "super" | "co_super" | "ops" | "finance" | "ads"
+        city         // city_ids this admin has access to; empty/absent = all cities
         active: true
         created_at
+    }
+}
+
+admin_demande {
+    id {
+        name
+        email
+        phone
+        role
+        city
     }
 }
 

@@ -1,7 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 import 'package:flutter_application_1/widgets/discard_changes_dialog.dart';
@@ -175,8 +175,7 @@ class _StoreWorkTimePageState extends State<StoreWorkTimePage>
     return [(start, end)];
   }
 
-  bool _rangesOverlap((int, int) a, (int, int) b) =>
-      a.$1 < b.$2 && b.$1 < a.$2;
+  bool _rangesOverlap((int, int) a, (int, int) b) => a.$1 < b.$2 && b.$1 < a.$2;
 
   /// The existing slot [_slots] that the given day/time range collides
   /// with, if any - checked against every range-pair of both (a wrap-
@@ -413,8 +412,7 @@ class _StoreWorkTimePageState extends State<StoreWorkTimePage>
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-            color: const Color(0xFFE1E4E9),
-            style: BorderStyle.solid),
+            color: const Color(0xFFE1E4E9), style: BorderStyle.solid),
       ),
       child: Center(
         child: Text(
@@ -502,8 +500,8 @@ class _StoreWorkTimePageState extends State<StoreWorkTimePage>
                 child: _buildTimeField(
                   label: 'start_time_label',
                   time: _newStartTime,
-                  onTap: () => _pickTime(_newStartTime,
-                      (t) => setState(() => _newStartTime = t)),
+                  onTap: () => _pickTime(
+                      _newStartTime, (t) => setState(() => _newStartTime = t)),
                 ),
               ),
             ],

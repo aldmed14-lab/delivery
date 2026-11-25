@@ -119,14 +119,17 @@ class _OfferCardState extends State<_OfferCard> {
       return null;
     }
 
-    final total = DirectionsService.distanceKm(driverLat, driverLng, storeLat, storeLng) +
-        DirectionsService.distanceKm(storeLat, storeLng, dropoffLat, dropoffLng);
+    final total =
+        DirectionsService.distanceKm(driverLat, driverLng, storeLat, storeLng) +
+            DirectionsService.distanceKm(
+                storeLat, storeLng, dropoffLat, dropoffLng);
     return '${total.toStringAsFixed(1)} km';
   }
 
   @override
   Widget build(BuildContext context) {
-    final store = (widget.offer['store'] as Map?)?.cast<String, dynamic>() ?? {};
+    final store =
+        (widget.offer['store'] as Map?)?.cast<String, dynamic>() ?? {};
     final storeName = store['name'] as String? ?? '';
     final earning = (widget.offer['earning'] as num?) ?? 0;
     final currency = TranslationHelper.get('currency_unit');
@@ -180,7 +183,8 @@ class _OfferCardState extends State<_OfferCard> {
                           alignment: Alignment.center,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            border: Border.all(color: const Color(0xFFFF9800), width: 2),
+                            border: Border.all(
+                                color: const Color(0xFFFF9800), width: 2),
                           ),
                           child: Text(
                             '$_secondsLeft',
@@ -271,7 +275,8 @@ class _OfferCardState extends State<_OfferCard> {
                             ),
                             child: Text(
                               TranslationHelper.get('accept_button'),
-                              style: const TextStyle(fontWeight: FontWeight.w700),
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w700),
                             ),
                           ),
                         ),

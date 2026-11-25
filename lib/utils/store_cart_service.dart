@@ -95,15 +95,13 @@ class StoreCartService {
   /// different order) must still land on the same key, not a duplicate
   /// line for what's really an identical selection.
   static String lineKeyFor(String itemId, List<Map<String, dynamic>> groups) {
-    final groupsPart = groups
-        .map((g) {
-          final optionIds = ((g['selected'] as List?) ?? [])
-              .map((s) => s['option_id'].toString())
-              .toList()
-            ..sort();
-          return '${g['group_id']}:${optionIds.join(',')}';
-        })
-        .toList()
+    final groupsPart = groups.map((g) {
+      final optionIds = ((g['selected'] as List?) ?? [])
+          .map((s) => s['option_id'].toString())
+          .toList()
+        ..sort();
+      return '${g['group_id']}:${optionIds.join(',')}';
+    }).toList()
       ..sort();
     final signature = '${itemId}_${groupsPart.join('|')}';
     // option_id is a full UUID (Uuid().v4()) now, so concatenating them

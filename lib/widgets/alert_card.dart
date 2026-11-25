@@ -34,7 +34,9 @@ class AlertCard extends StatelessWidget {
         child: Row(
           children: [
             Icon(
-              isError ? Icons.error_outline_rounded : Icons.check_circle_rounded,
+              isError
+                  ? Icons.error_outline_rounded
+                  : Icons.check_circle_rounded,
               color: color,
               size: 18,
             ),
@@ -42,7 +44,8 @@ class AlertCard extends StatelessWidget {
             Expanded(
               child: Text(
                 message,
-                style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: color),
+                style: TextStyle(
+                    fontSize: 12.5, fontWeight: FontWeight.w700, color: color),
               ),
             ),
             InkWell(

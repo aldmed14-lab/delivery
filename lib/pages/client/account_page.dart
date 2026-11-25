@@ -2,7 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/pages/shared/support_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/user_profile_cache.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
@@ -58,7 +58,8 @@ class _AccountPageState extends State<AccountPage> with AlertCardMixin {
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
@@ -94,7 +95,8 @@ class _AccountPageState extends State<AccountPage> with AlertCardMixin {
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
@@ -498,5 +500,4 @@ class _AccountPageState extends State<AccountPage> with AlertCardMixin {
       ),
     );
   }
-
 }

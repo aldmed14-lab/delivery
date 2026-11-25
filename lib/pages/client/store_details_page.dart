@@ -2,7 +2,6 @@ import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/pages/client/cart_page.dart';
 import 'package:flutter_application_1/pages/client/store_details/item_detail_sheet.dart';
@@ -12,6 +11,8 @@ import 'package:flutter_application_1/utils/order_reorder_service.dart';
 import 'package:flutter_application_1/utils/store_cart_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/url_utils.dart';
+import 'package:flutter_application_1/utils/cities_service.dart';
+import 'package:flutter_application_1/utils/location_service.dart';
 import 'package:flutter_application_1/widgets/sponsored_ad_card.dart';
 import 'package:flutter_rating_bar/flutter_rating_bar.dart';
 
@@ -65,7 +66,9 @@ class _StoreDetailsState extends State<StoreDetails> {
   // OrderReorderService.isStoreInUserCity/cart_page.dart's checkout guard,
   // applied here to keep the user from browsing (let alone ordering from)
   // a store delivery can't actually reach.
-  bool _cityMismatch = false;
+  /// Why this store can't deliver to the active location (translation
+  /// key) - shown instead of the menu; null when it can.
+  String? _undeliverableReason;
   Map<String, dynamic>? _store;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _categories = [];
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _items = [];
@@ -122,16 +125,17 @@ class _StoreDetailsState extends State<StoreDetails> {
       }
       final store = storeSnap.data()!;
 
-      final storeCity = store['city'] as String?;
-      final userDoc =
-          await _firestore.collection('users').doc(widget.uid).get();
-      final userCity = (userDoc.data()?['address']
-          as Map<String, dynamic>?)?['city'] as String?;
-      if (!OrderReorderService.citiesMatch(storeCity, userCity)) {
+      // Another city, or beyond max_delivery_km from the active location
+      // (opened from an ad, a reorder or a link) - ordering is blocked.
+      try {
+        await CitiesService.instance.ensureLoaded();
+      } catch (_) {}
+      final reason = OrderReorderService.undeliverableReason(store);
+      if (reason != null) {
         if (mounted) {
           setState(() {
             _hasError = true;
-            _cityMismatch = true;
+            _undeliverableReason = reason;
             _isLoading = false;
           });
         }
@@ -190,13 +194,10 @@ class _StoreDetailsState extends State<StoreDetails> {
       final storeLng = (store['lng'] as num?)?.toDouble();
       if (storeLat == null || storeLng == null) return;
 
-      final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid == null) return;
-      final userDoc = await _firestore.collection('users').doc(uid).get();
-      final address = userDoc.data()?['address'] as Map<String, dynamic>?;
-      final userLat = (address?['lat'] as num?)?.toDouble();
-      final userLng = (address?['lng'] as num?)?.toDouble();
-      if (userLat == null || userLng == null) return;
+      final active = LocationService.instance.active;
+      if (active == null) return;
+      final userLat = active.lat;
+      final userLng = active.lng;
 
       final meters = _distanceMeters(userLat, userLng, storeLat, storeLng);
       if (mounted) setState(() => _distanceKm = meters / 1000);
@@ -239,7 +240,7 @@ class _StoreDetailsState extends State<StoreDetails> {
     final trendLevel = (store['trend_level'] as num?)?.toInt() ?? 0;
     final trendTime = store['trend_time'] as String?;
     final isTrending = trendLevel <= 10 && trendTime == _currentTrendHourKey();
-    final position = isTrending ? 'store_daitails_top10' : 'store_daitails';
+    final position = isTrending ? 'store_top10' : 'store';
 
     final ad = AdService.instance.nextAdFor(position);
     if (ad != null) AdService.instance.recordView(ad, position);
@@ -387,7 +388,8 @@ class _StoreDetailsState extends State<StoreDetails> {
                       // tab bar and this duplicate on screen at once.
                       if (_showStickyTabBar)
                         Positioned(
-                          top: _topBarHeight + MediaQuery.of(context).padding.top,
+                          top: _topBarHeight +
+                              MediaQuery.of(context).padding.top,
                           left: 0,
                           right: 0,
                           // The real sliver gets its height enforced by the
@@ -481,7 +483,9 @@ class _StoreDetailsState extends State<StoreDetails> {
     final hasPopulaire = _populaireItems.isNotEmpty;
     final categories = _visibleCategories;
     final activeTabId = _activeTabId ??
-        (hasPopulaire ? 'populaire' : (categories.isEmpty ? null : categories.first.id));
+        (hasPopulaire
+            ? 'populaire'
+            : (categories.isEmpty ? null : categories.first.id));
     return _TabBarDelegate(
       isArabic: _isArabic,
       hasPopulaire: hasPopulaire,
@@ -611,7 +615,7 @@ class _StoreDetailsState extends State<StoreDetails> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(
-                _cityMismatch
+                _undeliverableReason != null
                     ? Icons.location_off_outlined
                     : Icons.store_mall_directory_outlined,
                 size: 64,
@@ -619,7 +623,7 @@ class _StoreDetailsState extends State<StoreDetails> {
             const SizedBox(height: 16),
             Text(
               TranslationHelper.get(
-                  _cityMismatch ? 'reorder_different_city' : 'store_not_found'),
+                  _undeliverableReason ?? 'store_not_found'),
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
               textAlign: TextAlign.center,
             ),
@@ -1412,8 +1416,7 @@ class _StoreDetailsState extends State<StoreDetails> {
                               () => _openItemSheet(item),
                               small: true,
                             )
-                          : _addButton(() => _openItemSheet(item),
-                              small: true),
+                          : _addButton(() => _openItemSheet(item), small: true),
                 ),
               ],
             ),
@@ -1569,7 +1572,6 @@ class _StoreDetailsState extends State<StoreDetails> {
     );
   }
 }
-
 
 /// Sticky category tab bar: a "Populaire" chip first (if that section
 /// exists), then one per category, with a right-edge fade hinting more

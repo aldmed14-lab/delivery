@@ -7,11 +7,14 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:flutter_application_1/pages/client/live_order_page.dart';
-import 'package:flutter_application_1/pages/client/location_picker_sheet.dart';
-import 'package:flutter_application_1/pages/client/select_location_page.dart';
+import 'package:flutter_application_1/pages/client/address_flow.dart';
+import 'package:flutter_application_1/utils/cities_service.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
+import 'package:flutter_application_1/utils/order_reorder_service.dart';
 import 'package:flutter_application_1/utils/store_cart_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/url_utils.dart';
+import 'package:flutter_application_1/utils/location_service.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
 /// Sentinels for [_PushOrderPageState._selectedPaymentType] - anything else
@@ -50,14 +53,18 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
   // external providers shown as extra cards alongside cash/wallet.
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _paymentTypeOptions = [];
 
-  // Delivery address for this order - starts as the account's saved
-  // address, but "Modifier" can point it somewhere else (a different saved
-  // address, the device's current location, or a brand new one) without
-  // necessarily needing to touch the account's own default first.
+  // Delivery address for this order - the active location
+  // (LocationService). An order always goes to a SAVED address: if the user
+  // is browsing on the unsaved GPS position, placing the order first asks
+  // them to confirm the pin (lib/note.txt "checkout").
+  String? _deliveryAddressId;
   double? _deliveryLat;
   double? _deliveryLng;
-  String? _deliveryCity;
-  String? _deliveryLocationName;
+  String? _deliveryCityId;
+  String? _deliveryLabel;
+
+  /// The delivery city's pause message, null while it's taking orders.
+  String? _cityStopMessage;
 
   // Either _cashPaymentType, _walletPaymentType, or a payment_types doc id.
   String _selectedPaymentType = _cashPaymentType;
@@ -141,41 +148,27 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
       final userSnap =
           await _firestore.collection('users').doc(widget.uid).get();
       final user = userSnap.data();
-      final address = user?['address'] as Map<String, dynamic>?;
-      final userCity = address?['city'] as String?;
-
-      // Same rule store_details_page.dart/cart_page.dart already gate on
-      // before checkout Dis even reachable - re-checked here too since the
-      // user's city (or the store's) can still have changed in the moments
-      // since.
-      if (userCity == null || userCity != store['city']) {
+      try {
+        await CitiesService.instance.ensureLoaded();
+      } catch (_) {}
+      // Same rule store details / cart already gate on (same city, not too
+      // far) - re-checked since the location or the store can have changed.
+      final active = LocationService.instance.active;
+      if (active == null ||
+          OrderReorderService.undeliverableReason(store) != null) {
         if (mounted) setState(() => _hasError = true);
         return;
       }
 
-      final citySnap = await _firestore
-          .collection('cities')
-          .where('name', isEqualTo: userCity)
-          .limit(1)
-          .get();
-
-      final paymentTypesSnap = await _firestore
-          .collection('payment_types')
-          .where('cities', arrayContains: userCity)
-          .where('active', isEqualTo: true)
-          .get();
+      final cityInfo = await _loadCityInfo(active.cityId);
 
       if (!mounted) return;
       setState(() {
         _cartData = cartData;
         _store = store;
         _user = user;
-        _cityDoc = citySnap.docs.isNotEmpty ? citySnap.docs.first.data() : null;
-        _paymentTypeOptions = paymentTypesSnap.docs;
-        _deliveryLat = (address?['lat'] as num?)?.toDouble();
-        _deliveryLng = (address?['lng'] as num?)?.toDouble();
-        _deliveryCity = userCity;
-        _deliveryLocationName = address?['location_name'] as String?;
+        _applyCityInfo(cityInfo);
+        _applyLocation(active);
         _selectedPaymentType =
             _cashAvailable ? _cashPaymentType : _walletPaymentType;
         _isLoading = false;
@@ -299,95 +292,111 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
     return t < 0 ? 0 : t;
   }
 
-  Future<void> _pickAddress() async {
-    final result = await showModalBottomSheet<Object?>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => LocationPickerSheet(
-        uid: widget.uid,
-        language: widget.language,
-        activeCity: _deliveryCity,
-        activeLocationName: _deliveryLocationName,
-      ),
+  /// Fees, status and payment providers for the delivery city.
+  Future<_CityInfo> _loadCityInfo(String cityId) async {
+    final results = await Future.wait([
+      CitiesService.instance.fetchCityDoc(cityId),
+      CitiesService.instance.fetchStatus(cityId),
+      // payment_types.cities holds city ids.
+      _firestore
+          .collection('payment_types')
+          .where('cities', arrayContains: cityId)
+          .where('active', isEqualTo: true)
+          .get(),
+    ]);
+    return _CityInfo(
+      cityDoc: results[0] as Map<String, dynamic>?,
+      status: results[1] as CityStatus,
+      paymentTypes: (results[2] as QuerySnapshot<Map<String, dynamic>>).docs,
     );
-    if (!mounted || result == null) return;
-
-    if (result == 'add') {
-      final picked = await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => SelectMapPage(widget.language, canCancel: true),
-        ),
-      );
-      if (!mounted || picked is! Map || picked['city'] == null) return;
-      await _applyPickedAddress(
-        city: picked['city'] as String,
-        lat: (picked['lat'] as num).toDouble(),
-        lng: (picked['lng'] as num).toDouble(),
-        locationName: null,
-      );
-      return;
-    }
-
-    if (result is Map) {
-      final city = result['city'] as String?;
-      final lat = (result['lat'] as num?)?.toDouble();
-      final lng = (result['lng'] as num?)?.toDouble();
-      if (city == null || lat == null || lng == null) return;
-      await _applyPickedAddress(
-        city: city,
-        lat: lat,
-        lng: lng,
-        locationName: result['name'] as String?,
-      );
-    }
   }
 
-  /// A newly picked address delivering outside the store's own city can't
-  /// actually be delivered to (same rule as
-  /// `OrderReorderService.citiesMatch`) - rejected here rather than applied
-  /// and left for the (already-passed) checkout-open city gate to somehow
-  /// catch later.
-  Future<void> _applyPickedAddress({
-    required String city,
-    required double lat,
-    required double lng,
-    required String? locationName,
-  }) async {
-    if (city != _store?['city']) {
-      showAlert(TranslationHelper.get('reorder_different_city'), isError: true);
-      return;
+  void _applyCityInfo(_CityInfo info) {
+    _cityDoc = info.cityDoc;
+    _cityStopMessage = info.status.message(widget.language);
+    _paymentTypeOptions = info.paymentTypes;
+  }
+
+  void _applyLocation(ActiveLocation location) {
+    _deliveryAddressId = location.addressId;
+    _deliveryLat = location.lat;
+    _deliveryLng = location.lng;
+    _deliveryCityId = location.cityId;
+    _deliveryLabel = location.label;
+  }
+
+  /// "Modifier" - the same address picker as the home header, but without
+  /// "Current location" (an order needs a saved address). Whatever the user
+  /// picks becomes the active location everywhere; this page re-checks it.
+  Future<void> _pickAddress() async {
+    await AddressFlow.openPicker(context, widget.language,
+        allowCurrentLocation: false);
+    if (mounted) await _useActiveLocation();
+  }
+
+  /// Re-validates the (possibly new) active location for this store: same
+  /// city, not too far - then reloads fees, status and payment providers.
+  /// Returns false when it can't be used.
+  Future<bool> _useActiveLocation() async {
+    final active = LocationService.instance.active;
+    if (active == null) return false;
+    final reason = OrderReorderService.undeliverableReason(_store);
+    if (reason != null) {
+      showAlert(TranslationHelper.get(reason), isError: true);
+      return false;
     }
+    final sameAsShown = active.addressId == _deliveryAddressId &&
+        active.lat == _deliveryLat &&
+        active.lng == _deliveryLng;
+    if (sameAsShown) return true;
 
     setState(() => _isChangingAddress = true);
     try {
-      final citySnap = await _firestore
-          .collection('cities')
-          .where('name', isEqualTo: city)
-          .limit(1)
-          .get();
-      final paymentTypesSnap = await _firestore
-          .collection('payment_types')
-          .where('cities', arrayContains: city)
-          .where('active', isEqualTo: true)
-          .get();
-
-      if (!mounted) return;
+      final info = await _loadCityInfo(active.cityId);
+      if (!mounted) return false;
       setState(() {
-        _deliveryCity = city;
-        _deliveryLat = lat;
-        _deliveryLng = lng;
-        _deliveryLocationName = locationName;
-        _cityDoc = citySnap.docs.isNotEmpty ? citySnap.docs.first.data() : null;
-        _paymentTypeOptions = paymentTypesSnap.docs;
+        _applyCityInfo(info);
+        _applyLocation(active);
         if (_selectedPaymentType == _cashPaymentType && !_cashAvailable) {
           _selectedPaymentType = _walletPaymentType;
         }
       });
+      return true;
+    } catch (e) {
+      if (mounted) {
+        showAlert(
+            TranslationHelper.get(
+                isConnectivityError(e) ? 'no_internet' : 'error'),
+            isError: true);
+      }
+      return false;
     } finally {
       if (mounted) setState(() => _isChangingAddress = false);
     }
+  }
+
+  /// Ordering to the unsaved current location: just a warning ("delivered
+  /// to your GPS position, stay there") - nothing is saved. Returns false
+  /// if they backed out.
+  Future<bool> _confirmUnsavedAddress() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(TranslationHelper.get('confirm_delivery_address')),
+        content: Text(TranslationHelper.get('confirm_delivery_address_hint')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(TranslationHelper.get('cancel')),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(TranslationHelper.get('order_here')),
+          ),
+        ],
+      ),
+    );
+    return mounted && ok == true;
   }
 
   Future<void> _applyPromo() async {
@@ -493,7 +502,7 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
     final stores =
         (applicableTo?['stores'] as List?)?.cast<String>() ?? const [];
     final inScope = all ||
-        (_deliveryCity != null && cities.contains(_deliveryCity)) ||
+        (_deliveryCityId != null && cities.contains(_deliveryCityId)) ||
         stores.contains(widget.storeId);
     if (!inScope) {
       return TranslationHelper.get('promo_invalid_message');
@@ -526,10 +535,21 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
 
   Future<void> _placeOrder() async {
     if (_isPlacingOrder || _isRecalculating || _lines.isEmpty) return;
-    if (_deliveryLat == null || _deliveryLng == null || _deliveryCity == null) {
+    if (_deliveryLat == null ||
+        _deliveryLng == null ||
+        _deliveryCityId == null) {
       showAlert(TranslationHelper.get('select_address_required'),
           isError: true);
       return;
+    }
+    final stopMessage = _cityStopMessage;
+    if (stopMessage != null) {
+      showAlert(stopMessage, isError: true);
+      return;
+    }
+    // Current location (not a saved address): warn, then order to the point.
+    if (_deliveryAddressId == null) {
+      if (!await _confirmUnsavedAddress() || !mounted) return;
     }
     if (_selectedPaymentType == _cashPaymentType && !_cashAvailable) {
       showAlert(TranslationHelper.get('cash_payment_unavailable'),
@@ -560,12 +580,13 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
         'promo_code': _appliedPromo?['code'],
         'notes': _noteController.text.trim(),
         'idempotency_key': _idempotencyKey,
-        'delivery_address': {
-          'lat': _deliveryLat,
-          'lng': _deliveryLng,
-          'city': _deliveryCity,
-          'location_name': _deliveryLocationName,
-        },
+        // A saved address (the server reads it itself) or, for the
+        // current location, the bare point. Either way the server resolves
+        // the city from the point.
+        if (_deliveryAddressId != null)
+          'address_id': _deliveryAddressId
+        else
+          'location': {'lat': _deliveryLat, 'lng': _deliveryLng},
       });
 
       if (!mounted) return;
@@ -636,7 +657,8 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
     return e.message ?? TranslationHelper.get('error');
   }
 
-  Future<void> _showPaymentCodeDialog(String paymentCode, String? paymentImage) {
+  Future<void> _showPaymentCodeDialog(
+      String paymentCode, String? paymentImage) {
     return showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -1016,9 +1038,12 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
 
   Widget _buildAddressCard() {
     final hasPoint = _deliveryLat != null && _deliveryLng != null;
-    final label = (_deliveryLocationName?.isNotEmpty ?? false)
-        ? '${_deliveryCity ?? ''}, $_deliveryLocationName'
-        : (_deliveryCity ?? '');
+    final city =
+        CitiesService.instance.cityName(_deliveryCityId, widget.language);
+    final name = _deliveryAddressId == null
+        ? TranslationHelper.get('current_location_unconfirmed')
+        : (_deliveryLabel ?? '');
+    final label = city.isEmpty ? name : '$name · $city';
 
     return Container(
       decoration: BoxDecoration(
@@ -1042,6 +1067,15 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
               child: hasPoint
                   ? IgnorePointer(
                       child: GoogleMap(
+                        // initialCameraPosition only ever applies once, when
+                        // the platform view is first created - without this
+                        // key, picking a new address moves the marker (the
+                        // `markers` set below is re-diffed on every build)
+                        // but leaves the camera framing the old point.
+                        // Keying on the coordinates forces a fresh GoogleMap
+                        // instance - and a fresh initialCameraPosition -
+                        // every time the delivery point actually changes.
+                        key: ValueKey('$_deliveryLat,$_deliveryLng'),
                         initialCameraPosition: CameraPosition(
                           target: LatLng(_deliveryLat!, _deliveryLng!),
                           zoom: 15,
@@ -1443,4 +1477,17 @@ class _PushOrderPageState extends State<PushOrderPage> with AlertCardMixin {
       ),
     );
   }
+}
+
+/// The delivery city's fees doc, status and payment providers.
+class _CityInfo {
+  final Map<String, dynamic>? cityDoc;
+  final CityStatus status;
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>> paymentTypes;
+
+  const _CityInfo({
+    required this.cityDoc,
+    required this.status,
+    required this.paymentTypes,
+  });
 }

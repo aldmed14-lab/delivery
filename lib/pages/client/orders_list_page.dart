@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_application_1/pages/client/cart_page.dart';
 import 'package:flutter_application_1/pages/client/live_order_page.dart';
 import 'package:flutter_application_1/utils/ad_service.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/store_cart_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/url_utils.dart';

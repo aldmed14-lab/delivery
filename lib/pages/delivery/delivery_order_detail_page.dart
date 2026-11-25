@@ -6,7 +6,8 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:flutter_application_1/pages/shared/chat_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/pages/shared/support_page.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/directions_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
@@ -47,7 +48,8 @@ class DeliveryOrderDetailPage extends StatefulWidget {
   const DeliveryOrderDetailPage(this.language, this.orderId, {super.key});
 
   @override
-  State<DeliveryOrderDetailPage> createState() => _DeliveryOrderDetailPageState();
+  State<DeliveryOrderDetailPage> createState() =>
+      _DeliveryOrderDetailPageState();
 }
 
 class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
@@ -118,7 +120,9 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
     if (_isAdvancing) return;
     setState(() => _isAdvancing = true);
     try {
-      await FirebaseFunctions.instance.httpsCallable('advanceDeliveryStatus').call({
+      await FirebaseFunctions.instance
+          .httpsCallable('advanceDeliveryStatus')
+          .call({
         'order_id': widget.orderId,
         'new_status': next,
       });
@@ -126,7 +130,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
@@ -140,7 +145,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
   /// since that's what flips the order's users_transactions record to
   /// "completed" server-side (advanceDeliveryStatus). Wallet-paid orders
   /// (already settled at checkout) skip straight to _advance.
-  Future<void> _confirmThenAdvance(String next, {required bool isCashPayment}) async {
+  Future<void> _confirmThenAdvance(String next,
+      {required bool isCashPayment}) async {
     if (!isCashPayment) return _advance(next);
     final confirmed = await showDialog<bool>(
       context: context,
@@ -158,7 +164,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
               onPressed: () => Navigator.pop(context, true),
               child: Text(
                 TranslationHelper.get('delivery_cash_confirm_yes'),
-                style: const TextStyle(color: Color(0xFF2E7D32), fontWeight: FontWeight.w700),
+                style: const TextStyle(
+                    color: Color(0xFF2E7D32), fontWeight: FontWeight.w700),
               ),
             ),
           ],
@@ -202,7 +209,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
@@ -231,21 +239,25 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
         conversationId = result.data['conversation_id'] as String?;
       }
       if (conversationId == null || conversationId.isEmpty) {
-        if (mounted) showAlert(TranslationHelper.get('conversation_not_started'), isError: true);
+        if (mounted)
+          showAlert(TranslationHelper.get('conversation_not_started'),
+              isError: true);
         return;
       }
       if (mounted) {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => ChatPage(widget.language, conversationId!, _customerName ?? ''),
+            builder: (_) =>
+                ChatPage(widget.language, conversationId!, _customerName ?? ''),
           ),
         );
       }
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
@@ -293,7 +305,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
         Expanded(
           child: Center(
             child: Text(
-              TranslationHelper.get(isConnectivityError(error) ? 'no_internet' : 'error'),
+              TranslationHelper.get(
+                  isConnectivityError(error) ? 'no_internet' : 'error'),
               style: const TextStyle(color: Color(0xFF9AA1AC)),
             ),
           ),
@@ -315,9 +328,12 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
             child: Container(
               width: 38,
               height: 38,
-              decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+              decoration: const BoxDecoration(
+                  color: Colors.white, shape: BoxShape.circle),
               child: Icon(
-                _isArabic ? Icons.arrow_forward_ios_rounded : Icons.arrow_back_ios_new_rounded,
+                _isArabic
+                    ? Icons.arrow_forward_ios_rounded
+                    : Icons.arrow_back_ios_new_rounded,
                 size: 16,
                 color: const Color(0xFF2E3A59),
               ),
@@ -329,7 +345,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
   }
 
   Widget _buildContent(Map<String, dynamic> data) {
-    final storeAddress = (data['store_address'] as Map?)?.cast<String, dynamic>();
+    final storeAddress =
+        (data['store_address'] as Map?)?.cast<String, dynamic>();
     final userAddress = (data['user_address'] as Map?)?.cast<String, dynamic>();
     final storeLat = (storeAddress?['lat'] as num?)?.toDouble();
     final storeLng = (storeAddress?['lng'] as num?)?.toDouble();
@@ -344,13 +361,18 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
           children: [
             SizedBox(
               height: 220,
-              child: (storeLat != null && storeLng != null && userLat != null && userLng != null)
+              child: (storeLat != null &&
+                      storeLng != null &&
+                      userLat != null &&
+                      userLng != null)
                   ? StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
                       stream: _deliveryStream,
                       builder: (context, deliverySnap) {
                         final deliveryData = deliverySnap.data?.data();
-                        final driverLat = (deliveryData?['lat'] as num?)?.toDouble();
-                        final driverLng = (deliveryData?['lng'] as num?)?.toDouble();
+                        final driverLat =
+                            (deliveryData?['lat'] as num?)?.toDouble();
+                        final driverLng =
+                            (deliveryData?['lng'] as num?)?.toDouble();
                         return _RouteMap(
                           storeLat: storeLat,
                           storeLng: storeLng,
@@ -410,7 +432,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
           children: [
             Expanded(
               child: Text(
-                TranslationHelper.get('order_number_label', {'number': orderNumber}),
+                TranslationHelper.get(
+                    'order_number_label', {'number': orderNumber}),
                 style: const TextStyle(
                   fontSize: 17,
                   fontWeight: FontWeight.w800,
@@ -446,7 +469,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.payments_rounded, size: 15, color: Color(0xFF2E7D32)),
+                const Icon(Icons.payments_rounded,
+                    size: 15, color: Color(0xFF2E7D32)),
                 const SizedBox(width: 6),
                 Text(
                   TranslationHelper.get('order_payment_cash_label'),
@@ -543,17 +567,20 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
                 disabledBackgroundColor: const Color(0xFFFFD9A6),
                 elevation: 0,
                 padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14)),
               ),
               child: _isAdvancing
                   ? const SizedBox(
                       width: 20,
                       height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white),
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2.4, color: Colors.white),
                     )
                   : Text(
                       TranslationHelper.get('delivery_action_$next'),
-                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w800),
                     ),
             ),
           ),
@@ -571,14 +598,21 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
           width: double.infinity,
           child: TextButton(
             onPressed: pickedUp
-                ? () => showAlert(TranslationHelper.get('support_coming_soon'))
+                ? () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            SupportPage(widget.language, audience: 'delivery'),
+                      ),
+                    )
                 : _cancelDelivery,
             style: TextButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: 12),
             ),
             child: Text(
-              TranslationHelper.get(
-                  pickedUp ? 'delivery_call_support_button' : 'delivery_cancel_button'),
+              TranslationHelper.get(pickedUp
+                  ? 'delivery_call_support_button'
+                  : 'delivery_cancel_button'),
               style: const TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w700,
@@ -630,7 +664,9 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  title.isNotEmpty ? title : TranslationHelper.get('unknown_store'),
+                  title.isNotEmpty
+                      ? title
+                      : TranslationHelper.get('unknown_store'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -644,7 +680,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
                     subtitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
+                    style:
+                        const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
                   ),
               ],
             ),
@@ -669,7 +706,8 @@ class _DeliveryOrderDetailPageState extends State<DeliveryOrderDetailPage>
         child: Icon(
           icon,
           size: 17,
-          color: onTap == null ? const Color(0xFFC9CDD4) : const Color(0xFFFF9800),
+          color:
+              onTap == null ? const Color(0xFFC9CDD4) : const Color(0xFFFF9800),
         ),
       ),
     );
@@ -773,9 +811,12 @@ class _RouteMapState extends State<_RouteMap> {
     _iconsFuture ??= () async {
       const size = 42.0;
       final results = await Future.wait([
-        BitmapDescriptor.asset(configuration, 'assets/store.png', width: size, height: size),
-        BitmapDescriptor.asset(configuration, 'assets/home.png', width: size, height: size),
-        BitmapDescriptor.asset(configuration, 'assets/motor.png', width: size, height: size),
+        BitmapDescriptor.asset(configuration, 'assets/store.png',
+            width: size, height: size),
+        BitmapDescriptor.asset(configuration, 'assets/home.png',
+            width: size, height: size),
+        BitmapDescriptor.asset(configuration, 'assets/motor.png',
+            width: size, height: size),
       ]);
       return {'store': results[0], 'user': results[1], 'driver': results[2]};
     }();
@@ -819,7 +860,9 @@ class _RouteMapState extends State<_RouteMap> {
     final origin = LatLng(driverLat, driverLng);
     final destination = _destination;
 
-    if (!force && _lastFetchOrigin != null && _lastFetchDestination == destination) {
+    if (!force &&
+        _lastFetchOrigin != null &&
+        _lastFetchDestination == destination) {
       final movedMeters = DirectionsService.distanceKm(
             _lastFetchOrigin!.latitude,
             _lastFetchOrigin!.longitude,
@@ -877,8 +920,10 @@ class _RouteMapState extends State<_RouteMap> {
     final lats = points.map((p) => p.latitude);
     final lngs = points.map((p) => p.longitude);
     final bounds = LatLngBounds(
-      southwest: LatLng(lats.reduce((a, b) => a < b ? a : b), lngs.reduce((a, b) => a < b ? a : b)),
-      northeast: LatLng(lats.reduce((a, b) => a > b ? a : b), lngs.reduce((a, b) => a > b ? a : b)),
+      southwest: LatLng(lats.reduce((a, b) => a < b ? a : b),
+          lngs.reduce((a, b) => a < b ? a : b)),
+      northeast: LatLng(lats.reduce((a, b) => a > b ? a : b),
+          lngs.reduce((a, b) => a > b ? a : b)),
     );
     Future.delayed(const Duration(milliseconds: 200), () {
       controller.animateCamera(CameraUpdate.newLatLngBounds(bounds, 60));
@@ -937,8 +982,9 @@ class _RouteMapState extends State<_RouteMap> {
     }
 
     return GoogleMap(
-      initialCameraPosition:
-          CameraPosition(target: driverPos ?? (widget.routeToStore ? storePos : userPos), zoom: 14),
+      initialCameraPosition: CameraPosition(
+          target: driverPos ?? (widget.routeToStore ? storePos : userPos),
+          zoom: 14),
       onMapCreated: (controller) {
         _controller = controller;
         // Re-applies whatever _maybeFetchRoute already computed (it may

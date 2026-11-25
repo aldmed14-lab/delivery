@@ -1,9 +1,13 @@
+import 'dart:io';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 import 'package:flutter_application_1/widgets/discard_changes_dialog.dart';
@@ -78,7 +82,8 @@ class StoreItemEditPage extends StatefulWidget {
   final String language;
   final String storeId;
   final String? itemId;
-  const StoreItemEditPage(this.language, this.storeId, {this.itemId, super.key});
+  const StoreItemEditPage(this.language, this.storeId,
+      {this.itemId, super.key});
 
   @override
   State<StoreItemEditPage> createState() => _StoreItemEditPageState();
@@ -98,8 +103,15 @@ class _StoreItemEditPageState extends State<StoreItemEditPage>
 
   bool _isLoading = true;
   bool _isSaving = false;
+  bool _isUploadingImage = false;
   Object? _loadError;
   String _image = '';
+  // The image URL as of the last successful save (or initial load) - used
+  // only to know which old Storage file, if any, becomes orphaned by a
+  // re-upload. Distinct from _savedSignature, which just detects unsaved
+  // changes and can't tell what the PREVIOUS image url was once _image is
+  // overwritten by _pickImage.
+  String _savedImage = '';
   bool _exist = true;
   String? _categoryId;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _categories = [];
@@ -240,12 +252,14 @@ class _StoreItemEditPageState extends State<StoreItemEditPage>
       _priceController.text.trim(),
       _categoryId ?? '',
       _exist.toString(),
+      _image,
       groupsSig,
     ].join('|||');
   }
 
   void _syncSavedSnapshot() {
     _savedSignature = _formSignature();
+    _savedImage = _image;
   }
 
   bool _hasUnsavedChanges() {
@@ -293,26 +307,88 @@ class _StoreItemEditPageState extends State<StoreItemEditPage>
   String? _validateGroup(_GroupForm group, String groupLabel) {
     final n = group.options.length;
     if (n == 0) {
-      return TranslationHelper.get('group_needs_options', {'group': groupLabel});
+      return TranslationHelper.get(
+          'group_needs_options', {'group': groupLabel});
     }
     final min = int.tryParse(group.min.text.trim());
     final max = int.tryParse(group.max.text.trim());
     if (min == null || max == null) {
-      return TranslationHelper.get('group_invalid_min_max', {'group': groupLabel});
+      return TranslationHelper.get(
+          'group_invalid_min_max', {'group': groupLabel});
     }
     if (min < 0 || min >= n) {
-      return TranslationHelper.get('group_min_out_of_range', {'group': groupLabel});
+      return TranslationHelper.get(
+          'group_min_out_of_range', {'group': groupLabel});
     }
     if (max > n) {
-      return TranslationHelper.get('group_max_out_of_range', {'group': groupLabel});
+      return TranslationHelper.get(
+          'group_max_out_of_range', {'group': groupLabel});
     }
     if (max < min) {
-      return TranslationHelper.get('group_max_below_min', {'group': groupLabel});
+      return TranslationHelper.get(
+          'group_max_below_min', {'group': groupLabel});
     }
     if (max == min && max >= n) {
-      return TranslationHelper.get('group_max_equals_min_all', {'group': groupLabel});
+      return TranslationHelper.get(
+          'group_max_equals_min_all', {'group': groupLabel});
     }
     return null;
+  }
+
+  /// Lets the owner replace this item's photo from the gallery, uploads it
+  /// to Firebase Storage under a fresh id (never itemId - a brand new item
+  /// has no itemId yet, and reusing one for every re-upload would fight the
+  /// CDN/cache on every edit), and only swaps `_image` over to the new
+  /// download URL once the upload actually finishes. The old image (if any)
+  /// is intentionally left in Storage rather than deleted - it's still the
+  /// live `image` value until _save() commits, and deleting it in the
+  /// background of Storage cleanup, not this page.
+  // Same cap as demande_page.dart's ID/vehicle/store-application photos -
+  // kept consistent across every image upload in the app rather than each
+  // page inventing its own limit.
+  static const _maxImageBytes = 150 * 1024;
+
+  Future<void> _pickImage() async {
+    if (_isUploadingImage) return;
+    final XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 45,
+        maxWidth: 1024,
+      );
+    } catch (e) {
+      showAlert(TranslationHelper.get('error'), isError: true);
+      return;
+    }
+    if (picked == null) return;
+    if (await File(picked.path).length() > _maxImageBytes) {
+      showAlert(TranslationHelper.get('demande_image_too_large'),
+          isError: true);
+      return;
+    }
+
+    setState(() => _isUploadingImage = true);
+    try {
+      final online = await InternetConnectionService().checkNow();
+      if (!online) throw Exception('offline');
+      final ref = FirebaseStorage.instance
+          .ref('stores/${widget.storeId}/items/${const Uuid().v4()}.jpg');
+      await ref.putFile(File(picked.path));
+      final url = await ref.getDownloadURL();
+      if (!mounted) return;
+      setState(() => _image = url);
+    } catch (e) {
+      if (mounted) {
+        showAlert(
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
+          isError: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isUploadingImage = false);
+    }
   }
 
   Future<void> _save() async {
@@ -390,6 +466,19 @@ class _StoreItemEditPageState extends State<StoreItemEditPage>
         });
       }
       await batch.commit();
+
+      // Only after every write above actually lands - _savedImage still
+      // holds the url that was live when the page loaded (or last saved). A
+      // re-upload already replaced it in Storage with a new file (see
+      // _pickImage), so the old one is now unreferenced by anything and
+      // would otherwise leak forever. Best-effort: a failed delete just
+      // leaves a harmless orphan.
+      if (_savedImage.isNotEmpty && _savedImage != _image) {
+        FirebaseStorage.instance
+            .refFromURL(_savedImage)
+            .delete()
+            .catchError((_) {});
+      }
 
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
@@ -568,14 +657,33 @@ class _StoreItemEditPageState extends State<StoreItemEditPage>
           child: SizedBox(
             width: 52,
             height: 52,
-            child: _image.isNotEmpty
-                ? CachedNetworkImage(
-                    imageUrl: _image,
-                    fit: BoxFit.cover,
-                    placeholder: (c, u) => Container(color: Colors.grey[200]),
-                    errorWidget: (c, u, e) => Container(color: Colors.grey[200]),
-                  )
-                : Container(color: Colors.grey[200]),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _image.isNotEmpty
+                    ? CachedNetworkImage(
+                        imageUrl: _image,
+                        fit: BoxFit.cover,
+                        placeholder: (c, u) =>
+                            Container(color: Colors.grey[200]),
+                        errorWidget: (c, u, e) =>
+                            Container(color: Colors.grey[200]),
+                      )
+                    : Container(color: Colors.grey[200]),
+                if (_isUploadingImage)
+                  Container(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    child: const Center(
+                      child: SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
         const SizedBox(width: 12),
@@ -608,13 +716,14 @@ class _StoreItemEditPageState extends State<StoreItemEditPage>
         ),
         InkWell(
           borderRadius: BorderRadius.circular(19),
-          onTap: () =>
-              showAlert(TranslationHelper.get('change_image_coming_soon')),
+          onTap: _isUploadingImage ? null : _pickImage,
           child: Container(
             width: 38,
             height: 38,
-            decoration: const BoxDecoration(
-              color: Color(0xFFFF9800),
+            decoration: BoxDecoration(
+              color: _isUploadingImage
+                  ? const Color(0xFFFFD9A6)
+                  : const Color(0xFFFF9800),
               shape: BoxShape.circle,
             ),
             child: const Icon(Icons.add, color: Colors.white, size: 20),
@@ -746,7 +855,9 @@ class _StoreItemEditPageState extends State<StoreItemEditPage>
         isDense: true,
         hintText: hint,
         hintStyle: const TextStyle(
-            fontSize: 13, fontWeight: FontWeight.w400, color: Color(0xFFC9CDD4)),
+            fontSize: 13,
+            fontWeight: FontWeight.w400,
+            color: Color(0xFFC9CDD4)),
         contentPadding: const EdgeInsets.symmetric(vertical: 8),
         border: const UnderlineInputBorder(
             borderSide: BorderSide(color: Color(0xFFEDEFF2))),

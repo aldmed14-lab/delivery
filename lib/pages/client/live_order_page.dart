@@ -11,7 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:flutter_application_1/pages/shared/chat_page.dart';
 import 'package:flutter_application_1/utils/ad_service.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 import 'package:flutter_application_1/widgets/sponsored_ad_card.dart';
@@ -257,11 +257,13 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
   Future<void> _syncServerTime() async {
     try {
       final ref = _firestore.collection('system').doc('server_time_probe');
-      await ref.set({'t': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      await ref
+          .set({'t': FieldValue.serverTimestamp()}, SetOptions(merge: true));
       final snap = await ref.get(const GetOptions(source: Source.server));
       final serverTime = (snap.data()?['t'] as Timestamp?)?.toDate();
       if (serverTime != null && mounted) {
-        setState(() => _serverTimeOffset = serverTime.difference(DateTime.now()));
+        setState(
+            () => _serverTimeOffset = serverTime.difference(DateTime.now()));
       }
     } catch (_) {
       // Falls back to the device's own clock - not worth failing the page
@@ -937,7 +939,8 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
   Widget _buildEtaCard(_EtaInfo eta) {
     final accentColor =
         eta.isLate ? const Color(0xFFE74C3C) : const Color(0xFFFF9800);
-    final bgColor = eta.isLate ? const Color(0xFFFDF1F0) : const Color(0xFFFFF3E0);
+    final bgColor =
+        eta.isLate ? const Color(0xFFFDF1F0) : const Color(0xFFFFF3E0);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -954,7 +957,9 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
               borderRadius: BorderRadius.circular(10),
             ),
             child: Icon(
-              eta.isLate ? Icons.error_outline_rounded : Icons.access_time_rounded,
+              eta.isLate
+                  ? Icons.error_outline_rounded
+                  : Icons.access_time_rounded,
               color: accentColor,
               size: 18,
             ),
@@ -965,8 +970,9 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  TranslationHelper.get(
-                      eta.isLate ? 'order_late_label' : 'estimated_arrival_label'),
+                  TranslationHelper.get(eta.isLate
+                      ? 'order_late_label'
+                      : 'estimated_arrival_label'),
                   style:
                       const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC)),
                 ),
@@ -1004,7 +1010,8 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
       }
       if (conversationId == null || conversationId.isEmpty) {
         if (mounted) {
-          showAlert(TranslationHelper.get('conversation_not_started'), isError: true);
+          showAlert(TranslationHelper.get('conversation_not_started'),
+              isError: true);
         }
         return;
       }
@@ -1012,14 +1019,16 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => ChatPage(widget.language, conversationId!, driverName),
+            builder: (_) =>
+                ChatPage(widget.language, conversationId!, driverName),
           ),
         );
       }
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
@@ -1285,19 +1294,21 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
   // the estimated window - see _computeEta) - a generic "need help?" link
   // was here before regardless of how the order was actually doing; this
   // replaces it with something tied to a real signal instead of always
-  // being present. Once tapped (requestAdminCall sets orders.call_admin,
-  // the same flag the courier-search system's own hard-cap can set
-  // automatically), this switches to a persistent notice on every future
-  // open of this page - not just right after tapping - since the order
-  // doc's own call_admin field is what's actually checked, not any local
-  // "I already tapped this" state.
+  // being present. Once tapped, requestAdminCall auto-creates a `reports`
+  // doc and stamps orders.admin_report_id with it - the same escalation the
+  // courier-search system's own hard-cap can trigger automatically - so
+  // this switches to a persistent notice on every future open of this page
+  // (not just right after tapping), since the order doc's own
+  // admin_report_id is what's actually checked, not any local "I already
+  // tapped this" state.
   static const _adminCallThresholdMinutes = 30;
   bool _isCallingAdmin = false;
 
   Widget _buildAdminCallBar(Map<String, dynamic> data, _EtaInfo? eta) {
-    final alreadyCalled = data['call_admin'] == true;
-    final significantlyLate =
-        eta != null && eta.isLate && eta.lateMinutes >= _adminCallThresholdMinutes;
+    final alreadyCalled = data['admin_report_id'] != null;
+    final significantlyLate = eta != null &&
+        eta.isLate &&
+        eta.lateMinutes >= _adminCallThresholdMinutes;
     if (!alreadyCalled && !significantlyLate) {
       return const SizedBox.shrink();
     }
@@ -1354,7 +1365,8 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
                   height: 20,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFE74C3C)),
+                    valueColor:
+                        AlwaysStoppedAnimation<Color>(Color(0xFFE74C3C)),
                   ),
                 )
               : Text(
@@ -1381,7 +1393,8 @@ class _LiveOrderPageState extends State<LiveOrderPage> with AlertCardMixin {
     } catch (e) {
       if (mounted) {
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }

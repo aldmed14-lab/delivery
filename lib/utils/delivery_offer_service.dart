@@ -6,6 +6,8 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'package:flutter_application_1/utils/geohash.dart';
+
 /// App-wide pending-offer watcher for a delivery driver. Started once from
 /// HomeShell (after confirming users/{uid}.role == "delivery"), and again
 /// by DeliveryHomePage's own online/offline toggle so the listener's
@@ -77,7 +79,8 @@ class DeliveryOfferService extends ChangeNotifier {
     if (_sub != null && _uid == uid) return;
     stop();
     _uid = uid;
-    _sub = _firestore.collection('delivery').doc(uid).snapshots().listen((snap) {
+    _sub =
+        _firestore.collection('delivery').doc(uid).snapshots().listen((snap) {
       final data = snap.data();
       if (data?['is_online'] != true) {
         // Toggled offline (from this device or another) - stop reacting to
@@ -158,7 +161,8 @@ class DeliveryOfferService extends ChangeNotifier {
     try {
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        debugPrint('DeliveryOfferService: location services are disabled on this device');
+        debugPrint(
+            'DeliveryOfferService: location services are disabled on this device');
         return;
       }
 
@@ -168,12 +172,14 @@ class DeliveryOfferService extends ChangeNotifier {
       }
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        debugPrint('DeliveryOfferService: location permission not granted ($permission)');
+        debugPrint(
+            'DeliveryOfferService: location permission not granted ($permission)');
         return;
       }
 
       final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        locationSettings:
+            const LocationSettings(accuracy: LocationAccuracy.high),
       ).timeout(const Duration(seconds: 8));
 
       if (_uid != uid) return; // session changed while awaiting the fix
@@ -190,9 +196,14 @@ class DeliveryOfferService extends ChangeNotifier {
         debugPrint(
             'DeliveryOfferService: pushed active location ${position.latitude}, ${position.longitude} to RTDB');
       } else {
+        // geohash rides along with every lat/lng update - the courier search
+        // (functions/courierSearch.js) narrows candidates by geohash prefix,
+        // so a driver whose geohash was never written only matches once the
+        // search widens to the whole city.
         await _firestore.collection('delivery').doc(uid).update({
           'lat': position.latitude,
           'lng': position.longitude,
+          'geohash': Geohash.encode(position.latitude, position.longitude),
         });
         debugPrint(
             'DeliveryOfferService: pushed idle location ${position.latitude}, ${position.longitude} to Firestore');

@@ -1,6 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 
 enum _Period { d7, d30, y1 }
@@ -82,9 +82,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
       // Rating docs already carry the reviewer's name directly (doc id is
       // the user id, but there's no separate user_id field to join on) -
       // only fall back to a users/ lookup for older docs missing that name.
-      final reviews = ratingsSnap.docs
-          .map((d) => {...d.data(), '_id': d.id})
-          .toList();
+      final reviews =
+          ratingsSnap.docs.map((d) => {...d.data(), '_id': d.id}).toList();
       final missingNameIds = reviews
           .where((r) => (r['name'] as String? ?? '').isEmpty)
           .map((r) => r['_id'] as String)
@@ -122,7 +121,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
   /// (source, offset, count) for the current vs. previous window of a period
   /// - e.g. d7's previous window is _daily[7..14), which is why _load fetches
   /// 60 days / 24 months instead of just 30/12.
-  (List<Map<String, dynamic>>, int, int) _rangeFor(_Period period, {required bool previous}) {
+  (List<Map<String, dynamic>>, int, int) _rangeFor(_Period period,
+      {required bool previous}) {
     switch (period) {
       case _Period.d7:
         return (_daily, previous ? 7 : 0, 7);
@@ -133,7 +133,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
     }
   }
 
-  Map<String, num> _sumRange(List<Map<String, dynamic>> source, int offset, int count) {
+  Map<String, num> _sumRange(
+      List<Map<String, dynamic>> source, int offset, int count) {
     final docs = source.skip(offset).take(count).toList();
     num orders = 0;
     num completed = 0;
@@ -145,7 +146,12 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
       canceled += (d['total_canceled'] as num?) ?? 0;
       revenue += (d['total_revenue'] as num?)?.toDouble() ?? 0;
     }
-    return {'orders': orders, 'completed': completed, 'canceled': canceled, 'revenue': revenue};
+    return {
+      'orders': orders,
+      'completed': completed,
+      'canceled': canceled,
+      'revenue': revenue
+    };
   }
 
   Map<String, num> _statsFor(_Period period) {
@@ -208,8 +214,18 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
   String _monthLabel(String? monthKey) {
     if (monthKey == null || monthKey.length < 7) return '';
     const names = [
-      'Jan', 'Fev', 'Mar', 'Avr', 'Mai', 'Jun',
-      'Jul', 'Aou', 'Sep', 'Oct', 'Nov', 'Dec',
+      'Jan',
+      'Fev',
+      'Mar',
+      'Avr',
+      'Mai',
+      'Jun',
+      'Jul',
+      'Aou',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     final m = int.tryParse(monthKey.substring(5, 7));
     if (m == null || m < 1 || m > 12) return '';
@@ -240,19 +256,25 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
       case _Period.d7:
         final days = _daily.take(7).toList().reversed.toList();
         return (
-          days.map((d) => ((d['completed_orders'] as num?) ?? 0).toDouble()).toList(),
+          days
+              .map((d) => ((d['completed_orders'] as num?) ?? 0).toDouble())
+              .toList(),
           days.map((d) => _dayLabel(d['day'] as String?)).toList(),
         );
       case _Period.d30:
         final days = _daily.take(30).toList().reversed.toList();
         return (
-          days.map((d) => ((d['completed_orders'] as num?) ?? 0).toDouble()).toList(),
+          days
+              .map((d) => ((d['completed_orders'] as num?) ?? 0).toDouble())
+              .toList(),
           days.map((d) => _dayLabel(d['day'] as String?)).toList(),
         );
       case _Period.y1:
         final months = _monthly.reversed.toList();
         return (
-          months.map((d) => ((d['completed_orders'] as num?) ?? 0).toDouble()).toList(),
+          months
+              .map((d) => ((d['completed_orders'] as num?) ?? 0).toDouble())
+              .toList(),
           months.map((d) => _monthLabel(d['month'] as String?)).toList(),
         );
     }
@@ -313,8 +335,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
   Widget _buildHeader() {
     return Container(
       width: double.infinity,
-      padding:
-          EdgeInsets.fromLTRB(16, MediaQuery.of(context).padding.top + 12, 16, 20),
+      padding: EdgeInsets.fromLTRB(
+          16, MediaQuery.of(context).padding.top + 12, 16, 20),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -407,7 +429,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
             completedDelta: _deltaPercent(completed, prevCompleted),
             canceledDelta: _deltaPercent(canceled, prevCanceled),
             avgOrderValueDelta: _deltaPercent(avgOrderValue, prevAvgOrderValue),
-            completionRateDelta: _deltaPercent(completionRate, prevCompletionRate),
+            completionRateDelta:
+                _deltaPercent(completionRate, prevCompletionRate),
           ),
         const SizedBox(height: 22),
         _buildChartCard(
@@ -705,7 +728,9 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
 
   Widget _buildHoursTrendChart() {
     final last7 = _daily.take(7).toList();
-    final today = last7.isNotEmpty ? _hoursArray(last7.first['hours'] as Map<String, dynamic>?) : List<double>.filled(24, 0);
+    final today = last7.isNotEmpty
+        ? _hoursArray(last7.first['hours'] as Map<String, dynamic>?)
+        : List<double>.filled(24, 0);
     final average = _avgHoursArray(last7);
     final peakHour = _peakHour(average);
 
@@ -722,9 +747,11 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
         const SizedBox(height: 12),
         Row(
           children: [
-            _buildLegendDot(const Color(0xFFFF9800), TranslationHelper.get('analytics_hours_today_legend')),
+            _buildLegendDot(const Color(0xFFFF9800),
+                TranslationHelper.get('analytics_hours_today_legend')),
             const SizedBox(width: 16),
-            _buildLegendDash(const Color(0xFFBFC5D2), TranslationHelper.get('analytics_hours_average_legend')),
+            _buildLegendDash(const Color(0xFFBFC5D2),
+                TranslationHelper.get('analytics_hours_average_legend')),
           ],
         ),
         if (peakHour != null) ...[
@@ -738,7 +765,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
             ),
             child: Row(
               children: [
-                const Icon(Icons.trending_up_rounded, size: 16, color: Color(0xFFFF9800)),
+                const Icon(Icons.trending_up_rounded,
+                    size: 16, color: Color(0xFFFF9800)),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -783,7 +811,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
         const SizedBox(width: 6),
-        Text(label, style: const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC))),
+        Text(label,
+            style: const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC))),
       ],
     );
   }
@@ -798,7 +827,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
           child: CustomPaint(painter: _DashPainter(color: color)),
         ),
         const SizedBox(width: 6),
-        Text(label, style: const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC))),
+        Text(label,
+            style: const TextStyle(fontSize: 11.5, color: Color(0xFF9AA1AC))),
       ],
     );
   }
@@ -833,7 +863,8 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
               ),
               const Spacer(),
               if (_rateNumbers > 0) ...[
-                const Icon(Icons.star_rounded, size: 18, color: Color(0xFFFF9800)),
+                const Icon(Icons.star_rounded,
+                    size: 18, color: Color(0xFFFF9800)),
                 const SizedBox(width: 3),
                 Text(
                   _rate.toStringAsFixed(1),
@@ -845,8 +876,10 @@ class _StoreAnalyticsPageState extends State<StoreAnalyticsPage> {
                 ),
                 const SizedBox(width: 4),
                 Text(
-                  TranslationHelper.get('analytics_reviews_count', {'count': _rateNumbers}),
-                  style: const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
+                  TranslationHelper.get(
+                      'analytics_reviews_count', {'count': _rateNumbers}),
+                  style:
+                      const TextStyle(fontSize: 12, color: Color(0xFF9AA1AC)),
                 ),
               ],
             ],
@@ -928,18 +961,21 @@ String _formatAxisValue(double value) {
   return value.round().toString();
 }
 
-void _drawYAxis(Canvas canvas, double leftAxis, double chartWidth, double chartHeight) {
+void _drawYAxis(
+    Canvas canvas, double leftAxis, double chartWidth, double chartHeight) {
   final gridPaint = Paint()
     ..color = const Color(0xFFF0F1F4)
     ..strokeWidth = 1;
   const ticks = [1.0, 0.5, 0.0];
   for (final t in ticks) {
     final y = chartHeight - t * chartHeight;
-    canvas.drawLine(Offset(leftAxis, y), Offset(leftAxis + chartWidth, y), gridPaint);
+    canvas.drawLine(
+        Offset(leftAxis, y), Offset(leftAxis + chartWidth, y), gridPaint);
   }
 }
 
-void _drawYAxisLabels(Canvas canvas, double leftAxis, double chartHeight, double safeMax) {
+void _drawYAxisLabels(
+    Canvas canvas, double leftAxis, double chartHeight, double safeMax) {
   const ticks = [1.0, 0.5, 0.0];
   for (final t in ticks) {
     final y = chartHeight - t * chartHeight;
@@ -1052,7 +1088,8 @@ class _HoursTrendChartPainter extends CustomPainter {
     const bottomAxis = 16.0;
     final chartWidth = size.width - leftAxis;
     final chartHeight = size.height - bottomAxis;
-    final maxValue = [...today, ...average].fold<double>(0, (m, v) => v > m ? v : m);
+    final maxValue =
+        [...today, ...average].fold<double>(0, (m, v) => v > m ? v : m);
     final safeMax = maxValue <= 0 ? 1.0 : maxValue;
     final stepX = chartWidth / 23;
 
@@ -1091,7 +1128,8 @@ class _HoursTrendChartPainter extends CustomPainter {
         var draw = true;
         while (drawn < segmentLength) {
           final len = draw ? dashWidth : dashGap;
-          final next = (drawn + len) > segmentLength ? segmentLength : drawn + len;
+          final next =
+              (drawn + len) > segmentLength ? segmentLength : drawn + len;
           if (draw) {
             canvas.drawLine(p1 + dir * drawn, p1 + dir * next, paint);
           }
@@ -1148,5 +1186,6 @@ class _DashPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _DashPainter oldDelegate) => oldDelegate.color != color;
+  bool shouldRepaint(covariant _DashPainter oldDelegate) =>
+      oldDelegate.color != color;
 }

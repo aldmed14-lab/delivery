@@ -14,7 +14,8 @@ class ChatPage extends StatefulWidget {
   final String language;
   final String conversationId;
   final String otherName;
-  const ChatPage(this.language, this.conversationId, this.otherName, {super.key});
+  const ChatPage(this.language, this.conversationId, this.otherName,
+      {super.key});
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -45,7 +46,8 @@ class _ChatPageState extends State<ChatPage> {
     super.initState();
     _conversationRef.get().then((snap) {
       if (!mounted) return;
-      final types = (snap.data()?['participant_types'] as Map?)?.cast<String, dynamic>();
+      final types =
+          (snap.data()?['participant_types'] as Map?)?.cast<String, dynamic>();
       setState(() => _senderType = types?[_uid] as String? ?? 'user');
     });
     _markRead();
@@ -101,8 +103,9 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   Widget build(BuildContext context) {
-    final displayName =
-        widget.otherName.isNotEmpty ? widget.otherName : TranslationHelper.get('chat_page_title');
+    final displayName = widget.otherName.isNotEmpty
+        ? widget.otherName
+        : TranslationHelper.get('chat_page_title');
     return Directionality(
       textDirection: _isArabic ? TextDirection.rtl : TextDirection.ltr,
       child: Scaffold(
@@ -118,7 +121,9 @@ class _ChatPageState extends State<ChatPage> {
                 radius: 18,
                 backgroundColor: const Color(0xFFFFF1DE),
                 child: Text(
-                  displayName.trim().isNotEmpty ? displayName.trim()[0].toUpperCase() : '?',
+                  displayName.trim().isNotEmpty
+                      ? displayName.trim()[0].toUpperCase()
+                      : '?',
                   style: const TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w800,
@@ -153,7 +158,8 @@ class _ChatPageState extends State<ChatPage> {
                   final docs = snapshot.data!.docs;
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (_scrollController.hasClients) {
-                      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+                      _scrollController
+                          .jumpTo(_scrollController.position.maxScrollExtent);
                     }
                   });
                   if (docs.isNotEmpty) _markRead();
@@ -165,14 +171,16 @@ class _ChatPageState extends State<ChatPage> {
                       final data = docs[index].data();
                       final isMine = data['sender_id'] == _uid;
                       final timestamp = data['created_at'] as Timestamp?;
-                      final previousTimestamp =
-                          index == 0 ? null : docs[index - 1].data()['created_at'] as Timestamp?;
-                      final showDateDivider =
-                          timestamp != null && !_isSameDay(timestamp, previousTimestamp);
+                      final previousTimestamp = index == 0
+                          ? null
+                          : docs[index - 1].data()['created_at'] as Timestamp?;
+                      final showDateDivider = timestamp != null &&
+                          !_isSameDay(timestamp, previousTimestamp);
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          if (showDateDivider) _DateDivider(timestamp: timestamp),
+                          if (showDateDivider)
+                            _DateDivider(timestamp: timestamp),
                           _MessageBubble(
                             text: data['message'] as String? ?? '',
                             isMine: isMine,
@@ -208,12 +216,15 @@ class _ChatPageState extends State<ChatPage> {
                 ),
                 child: TextField(
                   controller: _controller,
-                  textDirection: _isArabic ? TextDirection.rtl : TextDirection.ltr,
+                  textDirection:
+                      _isArabic ? TextDirection.rtl : TextDirection.ltr,
                   decoration: InputDecoration(
                     hintText: TranslationHelper.get('chat_input_hint'),
-                    hintStyle: const TextStyle(color: Color(0xFF9AA1AC), fontSize: 14),
+                    hintStyle:
+                        const TextStyle(color: Color(0xFF9AA1AC), fontSize: 14),
                     border: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
                   ),
                   onSubmitted: (_) => _send(),
                   textInputAction: TextInputAction.send,
@@ -227,7 +238,8 @@ class _ChatPageState extends State<ChatPage> {
               child: Container(
                 width: 44,
                 height: 44,
-                decoration: const BoxDecoration(color: Color(0xFFFF9800), shape: BoxShape.circle),
+                decoration: const BoxDecoration(
+                    color: Color(0xFFFF9800), shape: BoxShape.circle),
                 child: Icon(
                   _isArabic ? Icons.send_rounded : Icons.send_rounded,
                   color: Colors.white,
@@ -252,7 +264,9 @@ class _DateDivider extends StatelessWidget {
   String _label() {
     final date = timestamp.toDate();
     final now = DateTime.now();
-    if (date.year == now.year && date.month == now.month && date.day == now.day) {
+    if (date.year == now.year &&
+        date.month == now.month &&
+        date.day == now.day) {
       return TranslationHelper.get('chat_today');
     }
     final d = date.day.toString().padLeft(2, '0');
@@ -290,7 +304,8 @@ class _MessageBubble extends StatelessWidget {
   final bool isMine;
   final Timestamp? timestamp;
 
-  const _MessageBubble({required this.text, required this.isMine, required this.timestamp});
+  const _MessageBubble(
+      {required this.text, required this.isMine, required this.timestamp});
 
   String _timeLabel() {
     final date = timestamp?.toDate();
@@ -315,9 +330,11 @@ class _MessageBubble extends StatelessWidget {
       alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
+        constraints:
+            BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
         child: Column(
-          crossAxisAlignment: isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          crossAxisAlignment:
+              isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),

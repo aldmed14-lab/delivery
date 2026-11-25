@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import 'package:flutter_application_1/pages/delivery/delivery_order_detail_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
@@ -109,8 +109,9 @@ class _DeliveryOrdersPageState extends State<DeliveryOrdersPage>
         if (snapshot.hasError) {
           return Center(
             child: Text(
-              TranslationHelper.get(
-                  isConnectivityError(snapshot.error!) ? 'no_internet' : 'error'),
+              TranslationHelper.get(isConnectivityError(snapshot.error!)
+                  ? 'no_internet'
+                  : 'error'),
               style: const TextStyle(color: Color(0xFF9AA1AC)),
             ),
           );
@@ -208,7 +209,8 @@ class _DeliveryOrderCard extends StatelessWidget {
               children: [
                 Expanded(
                   child: Text(
-                    TranslationHelper.get('order_number_label', {'number': orderNumber}),
+                    TranslationHelper.get(
+                        'order_number_label', {'number': orderNumber}),
                     style: const TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.w800,
@@ -217,7 +219,8 @@ class _DeliveryOrderCard extends StatelessWidget {
                   ),
                 ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
                     color: const Color(0xFFFFF3E0),
                     borderRadius: BorderRadius.circular(20),
@@ -236,8 +239,10 @@ class _DeliveryOrderCard extends StatelessWidget {
             const SizedBox(height: 8),
             if (storeName.isNotEmpty)
               Text(
-                TranslationHelper.get('delivery_pickup_label', {'store': storeName}),
-                style: const TextStyle(fontSize: 12.5, color: Color(0xFF677489)),
+                TranslationHelper.get(
+                    'delivery_pickup_label', {'store': storeName}),
+                style:
+                    const TextStyle(fontSize: 12.5, color: Color(0xFF677489)),
               ),
             if (userAddress != null) ...[
               const SizedBox(height: 2),
@@ -246,7 +251,8 @@ class _DeliveryOrderCard extends StatelessWidget {
                   'lat': (userAddress['lat'] as num?)?.toStringAsFixed(4) ?? '',
                   'lng': (userAddress['lng'] as num?)?.toStringAsFixed(4) ?? '',
                 }),
-                style: const TextStyle(fontSize: 12.5, color: Color(0xFF677489)),
+                style:
+                    const TextStyle(fontSize: 12.5, color: Color(0xFF677489)),
               ),
             ],
             const SizedBox(height: 8),
@@ -272,7 +278,9 @@ class _DeliveryOrderCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
                 Icon(
-                  _isArabic ? Icons.chevron_left_rounded : Icons.chevron_right_rounded,
+                  _isArabic
+                      ? Icons.chevron_left_rounded
+                      : Icons.chevron_right_rounded,
                   size: 18,
                   color: const Color(0xFFFF9800),
                 ),

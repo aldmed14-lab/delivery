@@ -3,7 +3,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/pages/owner/owner_store_detail_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
+import 'package:flutter_application_1/utils/cities_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 
 /// The stores this account manages - `users/{uid}/stores` (`lib/map.txt`)
@@ -94,7 +95,13 @@ class _OwnerStoresPageState extends State<OwnerStoresPage> {
       'image': (linkData['image'] as String?) ??
           (storeData['image'] as String?) ??
           '',
-      'city': storeData['city'] as String? ?? '',
+      // Display only: the city's name from its id (cached cities), else the
+      // store's own city name field.
+      'city': CitiesService.instance
+              .byId(storeData['city_id'] as String?)
+              ?.name(widget.language) ??
+          storeData['city'] as String? ??
+          '',
     };
   }
 
@@ -309,8 +316,8 @@ class _OwnerStoresPageState extends State<OwnerStoresPage> {
       onTap: () => Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) =>
-              OwnerStoreDetailPage(widget.language, store['store_id'] as String),
+          builder: (_) => OwnerStoreDetailPage(
+              widget.language, store['store_id'] as String),
         ),
       ),
       child: Container(
@@ -337,7 +344,8 @@ class _OwnerStoresPageState extends State<OwnerStoresPage> {
                     ? CachedNetworkImage(
                         imageUrl: storeImage,
                         fit: BoxFit.cover,
-                        placeholder: (c, u) => Container(color: Colors.grey[200]),
+                        placeholder: (c, u) =>
+                            Container(color: Colors.grey[200]),
                         errorWidget: (c, u, e) => _buildPlaceholderImage(),
                       )
                     : _buildPlaceholderImage(),
@@ -362,14 +370,17 @@ class _OwnerStoresPageState extends State<OwnerStoresPage> {
                     const SizedBox(height: 3),
                     Text(
                       city,
-                      style: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA1AC)),
+                      style: const TextStyle(
+                          fontSize: 12.5, color: Color(0xFF9AA1AC)),
                     ),
                   ],
                 ],
               ),
             ),
             Icon(
-              _isArabic ? Icons.chevron_left_rounded : Icons.chevron_right_rounded,
+              _isArabic
+                  ? Icons.chevron_left_rounded
+                  : Icons.chevron_right_rounded,
               color: const Color(0xFFC9CDD4),
             ),
           ],
@@ -381,7 +392,8 @@ class _OwnerStoresPageState extends State<OwnerStoresPage> {
   Widget _buildPlaceholderImage() {
     return Container(
       color: const Color(0xFFFFEFD9),
-      child: const Icon(Icons.store_rounded, color: Color(0xFFFF9800), size: 24),
+      child:
+          const Icon(Icons.store_rounded, color: Color(0xFFFF9800), size: 24),
     );
   }
 }

@@ -120,8 +120,8 @@ class _FaqPageState extends State<FaqPage> {
         children: [
           InkWell(
             borderRadius: BorderRadius.circular(16),
-            onTap: () => setState(
-                () => _expandedIndex = isExpanded ? null : index),
+            onTap: () =>
+                setState(() => _expandedIndex = isExpanded ? null : index),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
               child: Row(
@@ -151,8 +151,9 @@ class _FaqPageState extends State<FaqPage> {
           ),
           AnimatedCrossFade(
             duration: const Duration(milliseconds: 200),
-            crossFadeState:
-                isExpanded ? CrossFadeState.showFirst : CrossFadeState.showSecond,
+            crossFadeState: isExpanded
+                ? CrossFadeState.showFirst
+                : CrossFadeState.showSecond,
             firstChild: Padding(
               padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
               child: Align(

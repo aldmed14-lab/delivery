@@ -4,7 +4,8 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_application_1/pages/delivery/delivery_finance_page.dart';
 import 'package:flutter_application_1/pages/delivery/delivery_orders_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/pages/shared/support_page.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/delivery_offer_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
@@ -22,7 +23,8 @@ class DeliveryHomePage extends StatefulWidget {
   State<DeliveryHomePage> createState() => _DeliveryHomePageState();
 }
 
-class _DeliveryHomePageState extends State<DeliveryHomePage> with AlertCardMixin {
+class _DeliveryHomePageState extends State<DeliveryHomePage>
+    with AlertCardMixin {
   final _firestore = FirebaseFirestore.instance;
   final _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
@@ -62,7 +64,8 @@ class _DeliveryHomePageState extends State<DeliveryHomePage> with AlertCardMixin
         .collection('orders')
         .where('delivery_id', isEqualTo: _uid)
         .where('delivery_status', isEqualTo: 'delivered')
-        .where('delivered_at', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfDay))
+        .where('delivered_at',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(startOfDay))
         .where('delivered_at', isLessThan: Timestamp.fromDate(startOfTomorrow));
   }
 
@@ -101,19 +104,20 @@ class _DeliveryHomePageState extends State<DeliveryHomePage> with AlertCardMixin
     // a deactivated account can't flip itself online, same as a store
     // that hasn't `start`ed can't change its own status.
     if (_delivery['active'] == false) {
-      showAlert(TranslationHelper.get('delivery_inactive_action_blocked'), isError: true);
+      showAlert(TranslationHelper.get('delivery_inactive_action_blocked'),
+          isError: true);
       return;
     }
-    // Firestore's offline write cache resolves `.update()` successfully
-    // the moment it's queued locally, WITHOUT actual connectivity - it
-    // doesn't wait for a server round-trip, so `await` below can complete
-    // with no error at all while genuinely offline. That used to mean the
-    // toggle flipped (and stayed flipped) even with zero internet, since
-    // nothing ever reached the catch block to trigger the rollback. Check
-    // real reachability explicitly first, before touching any UI state.
+    // An offline Firestore write doesn't fail - the Future just doesn't
+    // complete until the connection returns (the write stays queued and is
+    // sent then). So with zero internet the `await` below hangs, the catch
+    // block's rollback never runs, and the optimistically flipped toggle
+    // stays flipped even though nothing has reached the server. Check real
+    // reachability explicitly first, before touching any UI state.
     final online = await InternetConnectionService().checkNow();
     if (!online) {
-      if (mounted) showAlert(TranslationHelper.get('no_internet'), isError: true);
+      if (mounted)
+        showAlert(TranslationHelper.get('no_internet'), isError: true);
       return;
     }
     // Optimistic - matches the store status/menu-item toggle pattern used
@@ -139,7 +143,8 @@ class _DeliveryHomePageState extends State<DeliveryHomePage> with AlertCardMixin
       if (mounted) {
         setState(() => _delivery = {..._delivery, 'is_online': !value});
         showAlert(
-          TranslationHelper.get(isConnectivityError(e) ? 'no_internet' : 'error'),
+          TranslationHelper.get(
+              isConnectivityError(e) ? 'no_internet' : 'error'),
           isError: true,
         );
       }
@@ -264,7 +269,8 @@ class _DeliveryHomePageState extends State<DeliveryHomePage> with AlertCardMixin
     final isOnline = _delivery['is_online'] as bool? ?? false;
     final completed = (_delivery['completed_orders'] as num?) ?? 0;
     final cancelled = (_delivery['cancelled_orders'] as num?) ?? 0;
-    final payoutBalance = (_delivery['payout_balance'] as num?)?.toDouble() ?? 0.0;
+    final payoutBalance =
+        (_delivery['payout_balance'] as num?)?.toDouble() ?? 0.0;
     final rateSum = (_delivery['rate'] as num?)?.toDouble() ?? 0;
     final rateNumbers = (_delivery['rate_numbers'] as num?)?.toInt() ?? 0;
     final rate = rateNumbers > 0 ? rateSum / rateNumbers : 0.0;
@@ -369,12 +375,15 @@ class _DeliveryHomePageState extends State<DeliveryHomePage> with AlertCardMixin
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                TranslationHelper.get(
-                    isOnline ? 'delivery_online_label' : 'delivery_offline_label'),
+                TranslationHelper.get(isOnline
+                    ? 'delivery_online_label'
+                    : 'delivery_offline_label'),
                 style: TextStyle(
                   fontSize: 14.5,
                   fontWeight: FontWeight.w800,
-                  color: isOnline ? const Color(0xFF2E3A59) : const Color(0xFF9AA1AC),
+                  color: isOnline
+                      ? const Color(0xFF2E3A59)
+                      : const Color(0xFF9AA1AC),
                 ),
               ),
             ),
@@ -491,6 +500,22 @@ class _DeliveryHomePageState extends State<DeliveryHomePage> with AlertCardMixin
               ),
             ),
           ),
+          Divider(
+              height: 1,
+              color: const Color(0xFFF0F1F4),
+              indent: _isArabic ? 0 : 52,
+              endIndent: _isArabic ? 52 : 0),
+          _buildMenuRow(
+            icon: Icons.support_agent_outlined,
+            label: TranslationHelper.get('support_menu_item'),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) =>
+                    SupportPage(widget.language, audience: 'delivery'),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -528,7 +553,9 @@ class _DeliveryHomePageState extends State<DeliveryHomePage> with AlertCardMixin
               ),
             ),
             Icon(
-              _isArabic ? Icons.chevron_left_rounded : Icons.chevron_right_rounded,
+              _isArabic
+                  ? Icons.chevron_left_rounded
+                  : Icons.chevron_right_rounded,
               color: const Color(0xFFC9CDD4),
             ),
           ],

@@ -1,19 +1,18 @@
-import 'dart:convert';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/pages/client/store_details_page.dart';
 import 'package:flutter_application_1/utils/ad_service.dart';
-import 'package:flutter_application_1/utils/connection.dart';
-import 'package:flutter_application_1/utils/connection_ui.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
+import 'package:flutter_application_1/utils/connection_dialog.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/url_utils.dart';
+import 'package:flutter_application_1/utils/cities_service.dart';
+import 'package:flutter_application_1/utils/location_service.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 import 'package:flutter_application_1/widgets/sponsored_ad_card.dart';
 import 'package:flutter_application_1/widgets/store_grid_card.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class SearchPage extends StatefulWidget {
@@ -27,7 +26,7 @@ class SearchPage extends StatefulWidget {
   const SearchPage(this.language, {this.onBack, super.key});
 
   @override
-  _SearchPageState createState() => _SearchPageState();
+  State<SearchPage> createState() => _SearchPageState();
 }
 
 class _SearchPageState extends State<SearchPage> with AlertCardMixin {
@@ -39,24 +38,52 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
   List<Map<String, dynamic>> _searchResults = [];
   List<String> _recentSearches = [];
   String uid = "";
-  String? cityName;
+  /// The active location's city ([LocationService]).
+  String? _cityId;
+  double? _lat;
+  double? _lng;
   CachedAd? _searchAd;
 
   static const String _recentSearchesKey = 'recent_searches';
   static const int _maxRecentSearches = 5;
+  static const int _maxResults = 15;
 
-  // Algolia - synced from the `stores` collection by the "Search in
-  // Firestore with Algolia" Firebase Extension. This is the search-only
-  // (public/read-only) API key: safe to ship inside the app, unlike the
-  // admin key the extension itself uses to write the index.
-  static const String _algoliaAppId = 'BMVSX1CD4X';
-  static const String _algoliaSearchKey = '6297fb71b3d185a6ae62dc2dc9f0ce0e';
-  static const String _algoliaIndex = 'store_search';
+  /// Every active (`start == true`) store in the active city, loaded once on
+  /// the first search and then filtered locally for every later search -
+  /// so only the first search of the session costs Firestore reads.
+  /// Sorted by `trend` descending.
+  List<Map<String, dynamic>>? _cityStores;
 
   @override
   void initState() {
     super.initState();
+    LocationService.instance.addListener(_onLocationChanged);
     _initialize();
+  }
+
+  /// This page stays alive as a HomeShell tab, so it can be created before
+  /// home has resolved a location, and outlives later location changes -
+  /// follow [LocationService] instead of keeping what it first saw.
+  void _onLocationChanged() {
+    final active = LocationService.instance.active;
+    if (active == null) return;
+    final cityChanged = active.cityId != _cityId;
+    final pointChanged = active.lat != _lat || active.lng != _lng;
+    if (!cityChanged && !pointChanged) return;
+    _cityId = active.cityId;
+    _lat = active.lat;
+    _lng = active.lng;
+    if (cityChanged) _cityStores = null; // belongs to the old city
+    // The too-far filter depends on the point too.
+    _fetchTrendingStores();
+  }
+
+  /// Stores beyond max_delivery_km from the active location are hidden
+  /// (lib/note.txt), here as on home.
+  bool _deliverable(Map<String, dynamic> store) {
+    final lat = _lat, lng = _lng;
+    if (lat == null || lng == null) return true;
+    return !CitiesService.instance.isTooFar(store, lat, lng);
   }
 
   Future<void> _initialize() async {
@@ -78,11 +105,12 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
       if (user == null) return;
       uid = user.uid;
 
-      final userDoc =
-          await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      final data = userDoc.data();
-      final city = (data?['address'] as Map<String, dynamic>?)?['city'];
-      if (city is String && city.isNotEmpty) cityName = city;
+      final active = LocationService.instance.active;
+      if (active != null) {
+        _cityId = active.cityId;
+        _lat = active.lat;
+        _lng = active.lng;
+      }
     } catch (_) {
       // No city - the search ad slot just stays empty, everything else
       // (trending/search) works fine without it.
@@ -91,6 +119,7 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
 
   @override
   void dispose() {
+    LocationService.instance.removeListener(_onLocationChanged);
     _searchController.dispose();
     disposeAlert();
     // No AdService.flush() here - HomeShell owns the background flush
@@ -158,20 +187,25 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
     if (!mounted) return;
     // No city yet - there's no "show trending from everywhere" fallback,
     // same as the home page.
-    if (cityName == null) return;
+    final cityId = _cityId;
+    if (cityId == null) return;
     setState(() => _isLoading = true);
 
     try {
+      // A few extra, since too-far stores are dropped.
       final QuerySnapshot snapshot = await FirebaseFirestore.instance
           .collection('stores')
           .where('start', isEqualTo: true)
-          .where('city', isEqualTo: cityName)
+          .where('city_id', isEqualTo: cityId)
           .orderBy('trend', descending: true)
-          .limit(5)
+          .limit(15)
           .get();
+      if (cityId != _cityId) return; // location changed mid-load
 
       final List<Map<String, dynamic>> stores = snapshot.docs
           .map((doc) => {'id': doc.id, ...doc.data() as Map<String, dynamic>})
+          .where(_deliverable)
+          .take(5)
           .toList();
 
       if (mounted) {
@@ -201,62 +235,51 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
       _searchResults = [];
     });
 
+    // Guards against an older, slower search (e.g. the first one, which has
+    // to load the city's stores) landing after a newer one and overwriting
+    // its results.
+    final int searchId = ++_searchCounter;
+
     try {
-      // Algolia already has ranking/typo-tolerance built in, so there's no
-      // local fuzzy-matching step here.
-      final response = await http
-          .post(
-            Uri.parse(
-                'https://$_algoliaAppId-dsn.algolia.net/1/indexes/$_algoliaIndex/query'),
-            headers: {
-              'X-Algolia-API-Key': _algoliaSearchKey,
-              'X-Algolia-Application-Id': _algoliaAppId,
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({
-              'query': query,
-              'hitsPerPage': 15,
-              if (cityName != null) 'filters': 'city:"$cityName"',
-            }),
-          )
-          .timeout(const Duration(seconds: 10));
+      final stores = (await _getCityStores()).where(_deliverable).toList();
+      if (!mounted || searchId != _searchCounter) return;
 
-      if (response.statusCode != 200) {
-        throw Exception('Algolia search failed (${response.statusCode})');
+      final q = _normalize(query);
+      // Two buckets: names that start with the query rank above names that
+      // merely contain it. _cityStores is already sorted by trend, so each
+      // bucket keeps trend order without a second sort.
+      final List<Map<String, dynamic>> startsWith = [];
+      final List<Map<String, dynamic>> contains = [];
+      for (final store in stores) {
+        final names = _storeNames(store);
+        if (names.any((n) => n.startsWith(q))) {
+          startsWith.add(store);
+        } else if (names.any((n) => n.contains(q))) {
+          contains.add(store);
+        }
       }
 
-      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-      final hits = (decoded['hits'] as List?) ?? [];
+      final results = [...startsWith, ...contains].take(_maxResults).toList();
 
-      // Same "only show trending/featured stores" behavior as before -
-      // Algolia hits carry every field the extension synced, including `start`.
-      final List<Map<String, dynamic>> validStores = hits
-          .cast<Map<String, dynamic>>()
-          .where((hit) => hit['start'] == true)
-          .map((hit) => {'id': hit['objectID'], ...hit})
-          .toList();
-
-      if (validStores.isEmpty) {
-        await _fetchAdditionalTrendingStores([], 15);
-        if (mounted) setState(() => _isLoading = false);
-        return;
+      // Same as before: when there are fewer than _maxResults matches, top
+      // up with the city's trending stores - but only when there's at least
+      // one real match, so a search with no matches still shows the
+      // "no results" screen instead of looking like it matched.
+      if (results.isNotEmpty && results.length < _maxResults) {
+        final ids = results.map((s) => s['id']).toSet();
+        results.addAll(stores
+            .where((s) => !ids.contains(s['id']))
+            .take(_maxResults - results.length));
       }
 
-      if (validStores.length < 15) {
-        await _fetchAdditionalTrendingStores(
-            validStores, 15 - validStores.length);
-      }
-
-      if (mounted) {
-        setState(() {
-          _searchResults = validStores;
-          _isLoading = false;
-        });
-      }
+      setState(() {
+        _searchResults = results;
+        _isLoading = false;
+      });
     } catch (e, stack) {
       debugPrint("❌ Search error: $e");
       debugPrintStack(stackTrace: stack);
-      if (mounted) {
+      if (mounted && searchId == _searchCounter) {
         setState(() => _isLoading = false);
         _showSnack(TranslationHelper.get(
             isConnectivityError(e) ? 'no_internet' : 'error'));
@@ -264,56 +287,56 @@ class _SearchPageState extends State<SearchPage> with AlertCardMixin {
     }
   }
 
-  Future<void> _fetchAdditionalTrendingStores(
-      List<Map<String, dynamic>> existingStores, int limit) async {
-    if (cityName == null) {
-      if (mounted) {
-        setState(() {
-          _searchResults = existingStores;
-          _isLoading = false;
-        });
-      }
-      return;
-    }
+  int _searchCounter = 0;
 
-    try {
-      final Set<String> existingIds =
-          existingStores.map((store) => store['id'] as String).toSet();
+  /// Loads every active store in the user's city once per page session.
+  /// Equality-only filters, so no composite index is needed; sorted by
+  /// trend locally (instead of orderBy) so stores missing a `trend` field
+  /// still show up in search instead of being silently dropped by Firestore.
+  Future<List<Map<String, dynamic>>> _getCityStores() async {
+    if (_cityStores != null) return _cityStores!;
+    // No city - nothing to search, same as trending (there's no "search
+    // every city" fallback).
+    final city = _cityId;
+    if (city == null) return const [];
 
-      final QuerySnapshot snapshot = await FirebaseFirestore.instance
-          .collection('stores')
-          .where('start', isEqualTo: true)
-          .where('city', isEqualTo: cityName)
-          .orderBy('trend', descending: true)
-          .limit(limit + existingIds.length)
-          .get();
+    final snapshot = await FirebaseFirestore.instance
+        .collection('stores')
+        .where('start', isEqualTo: true)
+        .where('city_id', isEqualTo: city)
+        .get();
 
-      int addedCount = 0;
-      for (var doc in snapshot.docs) {
-        if (addedCount >= limit) break;
-        final String storeId = doc.id;
-        if (existingIds.contains(storeId)) continue;
-        final storeData = doc.data() as Map<String, dynamic>;
-        existingStores.add({'id': storeId, ...storeData});
-        addedCount++;
-      }
-
-      if (mounted) {
-        setState(() {
-          _searchResults = existingStores;
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      debugPrint(
-          "Erreur lors de la récupération des magasins tendance supplémentaires: $e");
-      if (mounted) {
-        setState(() => _isLoading = false);
-        _showSnack(TranslationHelper.get(
-            isConnectivityError(e) ? 'no_internet' : 'error'));
-      }
-    }
+    final stores = snapshot.docs
+        .map((doc) => <String, dynamic>{'id': doc.id, ...doc.data()})
+        .toList()
+      ..sort((a, b) =>
+          ((b['trend'] as num?) ?? 0).compareTo((a['trend'] as num?) ?? 0));
+    // Location changed mid-load - don't cache the old city's stores.
+    if (city == _cityId) _cityStores = stores;
+    return stores;
   }
+
+  /// Every normalized `name_*` field of a store (name_ar, name_fr, ...), so
+  /// a search matches the store whatever language the user types in.
+  Iterable<String> _storeNames(Map<String, dynamic> store) => store.entries
+      .where((e) => e.key.startsWith('name_') && e.value is String)
+      .map((e) => _normalize(e.value as String));
+
+  static final RegExp _arabicMarks = RegExp(r'[ً-ْٰـ]');
+  static final RegExp _alefVariants = RegExp('[أإآٱ]');
+  static final RegExp _spaces = RegExp(r'\s+');
+
+  /// Lowercases, strips Arabic diacritics/tatweel, and folds common Arabic
+  /// letter variants, so e.g. "مَطْعَم" matches "مطعم" and "Café" casing
+  /// doesn't matter.
+  static String _normalize(String s) => s
+      .toLowerCase()
+      .replaceAll(_arabicMarks, '')
+      .replaceAll(_alefVariants, 'ا')
+      .replaceAll('ة', 'ه')
+      .replaceAll('ى', 'ي')
+      .replaceAll(_spaces, ' ')
+      .trim();
 
   void _resetSearch() {
     setState(() {

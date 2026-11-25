@@ -2,8 +2,9 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
+import 'package:flutter_application_1/pages/owner/store_categories_page.dart';
 import 'package:flutter_application_1/pages/owner/store_item_edit_page.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/widgets/alert_card.dart';
 
@@ -49,7 +50,8 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
     super.initState();
     _load();
     _searchController.addListener(() {
-      setState(() => _searchQuery = _searchController.text.trim().toLowerCase());
+      setState(
+          () => _searchQuery = _searchController.text.trim().toLowerCase());
     });
   }
 
@@ -132,14 +134,15 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
   }
 
   Future<void> _toggleExist(_ItemRow item, bool value) async {
-    // Firestore's offline write cache resolves `.update()` successfully the
-    // moment it's queued locally, WITHOUT actual connectivity - it doesn't
-    // wait for a server round-trip, so `await` below can complete with no
-    // error at all while genuinely offline, and the catch block's rollback
-    // never runs. Check real reachability explicitly first.
+    // An offline Firestore write doesn't fail - the Future just doesn't
+    // complete until the connection returns (the write stays queued and is
+    // sent then), so the catch block's rollback never runs while offline and
+    // the optimistically flipped switch stays flipped. Check real
+    // reachability explicitly first.
     final online = await InternetConnectionService().checkNow();
     if (!online) {
-      if (mounted) showAlert(TranslationHelper.get('no_internet'), isError: true);
+      if (mounted)
+        showAlert(TranslationHelper.get('no_internet'), isError: true);
       return;
     }
     // Optimistic - flips instantly, rolled back only if the write fails.
@@ -164,6 +167,15 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
       MaterialPageRoute(
         builder: (_) =>
             StoreItemEditPage(widget.language, widget.storeId, itemId: itemId),
+      ),
+    ).then((_) => _load());
+  }
+
+  void _openCategories() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => StoreCategoriesPage(widget.language, widget.storeId),
       ),
     ).then((_) => _load());
   }
@@ -265,6 +277,21 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
               ),
               InkWell(
                 borderRadius: BorderRadius.circular(19),
+                onTap: _openCategories,
+                child: Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.22),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.category_outlined,
+                      size: 18, color: Colors.white),
+                ),
+              ),
+              const SizedBox(width: 8),
+              InkWell(
+                borderRadius: BorderRadius.circular(19),
                 onTap: () => _openItemEditor(),
                 child: Container(
                   width: 38,
@@ -298,8 +325,8 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
                       isDense: true,
                       border: InputBorder.none,
                       hintText: TranslationHelper.get('search_item_hint'),
-                      hintStyle:
-                          const TextStyle(fontSize: 13.5, color: Color(0xFF9AA1AC)),
+                      hintStyle: const TextStyle(
+                          fontSize: 13.5, color: Color(0xFF9AA1AC)),
                       contentPadding: const EdgeInsets.symmetric(vertical: 12),
                     ),
                   ),
@@ -322,8 +349,7 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Align(
-            alignment:
-                _isArabic ? Alignment.centerRight : Alignment.centerLeft,
+            alignment: _isArabic ? Alignment.centerRight : Alignment.centerLeft,
             child: Text(
               _selectedCategory == null
                   ? TranslationHelper.get('all')
@@ -411,6 +437,11 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
     final price = (data['price'] as num?) ?? 0;
     final image = data['image'] as String? ?? '';
     final exist = data['exist'] as bool? ?? true;
+    // Same 20%-floored platform cut advanceDeliveryStatus.js actually takes
+    // out of the subtotal at delivery (platformCommission()) - shown per
+    // item so the owner can see their real take-home, not just the listed
+    // price.
+    final storeGets = price - (price * 0.2).floor();
 
     return Container(
       padding: const EdgeInsets.all(10),
@@ -437,7 +468,8 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
                       imageUrl: image,
                       fit: BoxFit.cover,
                       placeholder: (c, u) => Container(color: Colors.grey[200]),
-                      errorWidget: (c, u, e) => Container(color: Colors.grey[200]),
+                      errorWidget: (c, u, e) =>
+                          Container(color: Colors.grey[200]),
                     )
                   : Container(color: Colors.grey[200]),
             ),
@@ -466,6 +498,15 @@ class _StoreMenuPageState extends State<StoreMenuPage> with AlertCardMixin {
                       fontSize: 12.5,
                       fontWeight: FontWeight.w700,
                       color: Color(0xFFFF9800),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${TranslationHelper.get('item_you_get_prefix')}$storeGets ${TranslationHelper.get('currency_unit')}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF9AA1AC),
                     ),
                   ),
                 ],

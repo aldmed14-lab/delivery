@@ -5,6 +5,7 @@ import 'package:flutter_application_1/main.dart';
 import 'package:flutter_application_1/pages/client/account_page.dart';
 import 'package:flutter_application_1/pages/client/home_shell.dart';
 import 'package:flutter_application_1/pages/client/order_history_list_page.dart';
+import 'package:flutter_application_1/pages/client/reports_page.dart';
 import 'package:flutter_application_1/pages/client/transactions_page.dart';
 import 'package:flutter_application_1/pages/delivery/delivery_home_page.dart';
 import 'package:flutter_application_1/pages/owner/owner_stores_page.dart';
@@ -13,7 +14,7 @@ import 'package:flutter_application_1/pages/shared/help_page.dart';
 import 'package:flutter_application_1/utils/translation_helper.dart';
 import 'package:flutter_application_1/utils/user_profile_cache.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_application_1/utils/connection.dart';
+import 'package:flutter_application_1/utils/internet_connection_service.dart';
 
 class ProfilePage extends StatefulWidget {
   final String language;
@@ -21,7 +22,7 @@ class ProfilePage extends StatefulWidget {
   const ProfilePage(this.language, {super.key});
 
   @override
-  _ProfilePageState createState() => _ProfilePageState();
+  State<ProfilePage> createState() => _ProfilePageState();
 }
 
 /// No fetch, no loading state: name/phone come from [UserProfileCache],
@@ -208,6 +209,14 @@ class _ProfilePageState extends State<ProfilePage> {
               MaterialPageRoute(
                 builder: (_) => TransactionsPage(widget.language),
               ),
+            ),
+          ),
+          _buildRow(
+            icon: Icons.flag_outlined,
+            label: TranslationHelper.get('my_reports'),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => ReportsPage(widget.language)),
             ),
           ),
         ]),

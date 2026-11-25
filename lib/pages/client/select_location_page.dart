@@ -1,50 +1,41 @@
 import 'dart:math' as math;
 
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
-import '../../utils/connection.dart';
-import '../../utils/connection_ui.dart';
-import '../../utils/geohash.dart';
-import '../../utils/point_in_polygon.dart';
+import '../../utils/cities_service.dart';
+import '../../utils/city_resolver.dart';
 import '../../utils/translation_helper.dart';
 
-class _Area {
-  final String name;
-  final List<LatLng> boundary;
-
-  _Area({required this.name, required this.boundary});
-}
-
-/// Lets the user pick their delivery location: the map opens centered on
-/// their real position (if available), they pan the map to move a fixed
-/// center pin. As soon as the map settles (camera idle - no button needed),
-/// the pinned point is checked automatically:
-///   1. which (if any) polygon in the top-level `areas` collection contains
-///      the point - purely local geometry, no network call per move;
-///   2. whether that area's name matches an active document in `cities`
-///      (name == area.name && active == true) - also checked against a
-///      locally cached set, loaded once up front.
-/// The button only ever saves an already-validated location; it never
-/// re-checks anything itself. To add a new servicable area later: draw and
-/// name a polygon matching an existing (or new) `cities.name`, add it to
-/// the `areas` collection - nothing else in this file needs to change.
+/// Pick a point on the map (lib/note.txt LOCATION SYSTEM "map picker"): the
+/// user pans the map under a fixed center pin. When the map settles, the
+/// point is checked against the cached city polygons ([CitiesService]):
+///   - inside an active city  -> green, city name, [Confirm]
+///   - inside a paused city   -> grey, the city's stop reason
+///   - outside every city     -> grey, "we don't deliver here yet"
+/// Only polygons are checked locally; a city's status is read once per city
+/// and remembered while the page is open.
+///
+/// This page never saves anything: it pops `{lat, lng, city_id}` for the
+/// caller to save (or null when backed out).
 class SelectMapPage extends StatefulWidget {
   final String language;
 
-  /// When false (the default) - first-time setup, where the caller has no
-  /// usable location yet - the back arrow and system back gesture/button are
-  /// both disabled. The only way out is picking a valid, serviced location.
-  /// Pass true when the user already has a saved location and is just
-  /// choosing to change it, so backing out without changing anything is
-  /// fine.
+  /// When false - first-time setup with no usable location yet - the back
+  /// arrow and system back are disabled; the only way out is a valid pick.
   final bool canCancel;
 
-  const SelectMapPage(this.language, {this.canCancel = false, super.key});
+  /// Where the map opens. Null = the device's GPS position if available,
+  /// else one fixed default point.
+  final LatLng? initialPoint;
+
+  const SelectMapPage(
+    this.language, {
+    this.canCancel = true,
+    this.initialPoint,
+    super.key,
+  });
 
   @override
   State<SelectMapPage> createState() => _SelectMapPageState();
@@ -53,25 +44,22 @@ class SelectMapPage extends StatefulWidget {
 enum _CheckStatus { checking, valid, invalid }
 
 class _SelectMapPageState extends State<SelectMapPage> {
-  // Nouakchott, Mauritania - used only as a fallback when the device's real
-  // location can't be determined (permission denied, GPS off, etc.).
+  // Nouakchott - only when there's no initial point and no GPS.
   static const LatLng _fallbackCenter = LatLng(18.0735, -15.9582);
 
-  GoogleMapController? _mapController;
   LatLng _center = _fallbackCenter;
-  bool _isPreparing = true; // determining position + loading areas/cities
-  bool _isSaving = false;
-
-  List<_Area> _areas = [];
-  Set<String> _activeCityNames = {};
+  bool _isPreparing = true;
   bool _loadFailed = false;
 
   _CheckStatus _checkStatus = _CheckStatus.checking;
-  String? _resolvedCity;
+  String? _resolvedCity; // display name
+  String? _resolvedCityId;
   String _checkMessage = '';
 
-  // Loaded once from assets/map_style.json and cached - starts null and the
-  // map renders with the default Google style until it's ready.
+  /// cityId -> status, read once per city while this page is open.
+  final Map<String, CityStatus> _statusCache = {};
+  int _checkRequestId = 0;
+
   String? _mapStyle;
 
   bool get _isArabic => widget.language == 'ar';
@@ -88,13 +76,12 @@ class _SelectMapPageState extends State<SelectMapPage> {
       final style = await rootBundle.loadString('assets/map_style.json');
       if (mounted) setState(() => _mapStyle = style);
     } catch (_) {
-      // Falls back to the default Google style - not worth failing the
-      // page over cosmetic map styling.
+      // Default Google style - not worth failing the page over.
     }
   }
 
   Future<void> _initialize() async {
-    await Future.wait([_determineInitialPosition(), _loadAreasAndCities()]);
+    await Future.wait([_determineInitialPosition(), _loadCities()]);
     if (mounted) {
       setState(() => _isPreparing = false);
       _checkCurrentLocation();
@@ -102,82 +89,29 @@ class _SelectMapPageState extends State<SelectMapPage> {
   }
 
   Future<void> _determineInitialPosition() async {
-    try {
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) return;
-
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        return;
-      }
-
-      final position = await Geolocator.getCurrentPosition().timeout(
-        const Duration(seconds: 10),
-      );
-      if (!mounted) return;
+    final initial = widget.initialPoint;
+    if (initial != null) {
+      _center = initial;
+      return;
+    }
+    final position = await CityResolver.devicePosition();
+    if (position != null && mounted) {
       _center = LatLng(position.latitude, position.longitude);
-      _mapController?.moveCamera(CameraUpdate.newLatLng(_center));
-    } catch (_) {
-      // Keep the fallback center - not worth blocking the picker over this.
     }
   }
 
-  /// Loads every drawn area's polygon and every active city's name once, up
-  /// front, so the actual on-map check (see [_checkCurrentLocation]) is pure
-  /// in-memory lookups - no network call, no cost, on every camera-idle
-  /// event.
-  Future<void> _loadAreasAndCities() async {
+  Future<void> _loadCities() async {
     try {
-      final results = await Future.wait([
-        FirebaseFirestore.instance.collection('areas').get(),
-        FirebaseFirestore.instance
-            .collection('cities')
-            .where('active', isEqualTo: true)
-            .get(),
-      ]);
-      final areasSnapshot = results[0];
-      final citiesSnapshot = results[1];
-
-      final areas = <_Area>[];
-      for (final doc in areasSnapshot.docs) {
-        final data = doc.data();
-        final name = data['name'] as String?;
-        final boundaryRaw = data['boundary'] as List?;
-        if (name == null || boundaryRaw == null || boundaryRaw.length < 3) {
-          continue;
-        }
-        final boundary = boundaryRaw
-            .map((p) => LatLng(
-                  ((p as Map)['lat'] as num).toDouble(),
-                  (p['lng'] as num).toDouble(),
-                ))
-            .toList();
-        areas.add(_Area(name: name, boundary: boundary));
-      }
-
-      final activeCityNames = citiesSnapshot.docs
-          .map((doc) => doc.data()['name'] as String?)
-          .whereType<String>()
-          .toSet();
-
-      if (mounted) {
-        _areas = areas;
-        _activeCityNames = activeCityNames;
-      }
+      await CitiesService.instance.ensureLoaded();
     } catch (_) {
       _loadFailed = true;
     }
   }
 
-  /// Runs automatically whenever the map stops moving (see `onCameraIdle`
-  /// below) and once right after setup finishes. Purely informational and
-  /// purely local - it never saves anything, just tells the user whether
-  /// the pinned point is somewhere the confirm button will actually accept.
-  void _checkCurrentLocation() {
+  /// Runs whenever the map stops moving, and once after setup. Never saves
+  /// anything - it only tells the user whether [Confirm] will accept the
+  /// pinned point.
+  Future<void> _checkCurrentLocation() async {
     if (_loadFailed) {
       setState(() {
         _checkStatus = _CheckStatus.invalid;
@@ -186,77 +120,62 @@ class _SelectMapPageState extends State<SelectMapPage> {
       return;
     }
 
-    for (final area in _areas) {
-      if (PointInPolygon.contains(_center, area.boundary)) {
-        if (_activeCityNames.contains(area.name)) {
-          setState(() {
-            _checkStatus = _CheckStatus.valid;
-            _resolvedCity = area.name;
-          });
-        } else {
-          // The zone is drawn, but there's no matching active `cities` doc
-          // yet - treat it the same as "not serviced" rather than silently
-          // accepting it.
-          setState(() {
-            _checkStatus = _CheckStatus.invalid;
-            _resolvedCity = null;
-            _checkMessage = TranslationHelper.get('city_not_available');
-          });
-        }
+    final requestId = ++_checkRequestId;
+    final city =
+        CitiesService.instance.resolve(_center.latitude, _center.longitude);
+    if (city == null) {
+      setState(() {
+        _checkStatus = _CheckStatus.invalid;
+        _resolvedCity = null;
+        _resolvedCityId = null;
+        _checkMessage = TranslationHelper.get('city_not_available');
+      });
+      return;
+    }
+
+    var status = _statusCache[city.id];
+    if (status == null) {
+      setState(() => _checkStatus = _CheckStatus.checking);
+      try {
+        status = await CitiesService.instance.fetchStatus(city.id);
+        _statusCache[city.id] = status;
+      } catch (_) {
+        if (!mounted || requestId != _checkRequestId) return;
+        setState(() {
+          _checkStatus = _CheckStatus.invalid;
+          _checkMessage = TranslationHelper.get('no_internet');
+        });
         return;
       }
     }
+    // The map moved again while the status was loading.
+    if (!mounted || requestId != _checkRequestId) return;
 
+    final stopMessage = status.message(widget.language);
     setState(() {
-      _checkStatus = _CheckStatus.invalid;
-      _resolvedCity = null;
-      _checkMessage = TranslationHelper.get('city_not_available');
+      _resolvedCity = city.name(widget.language);
+      if (stopMessage == null) {
+        _checkStatus = _CheckStatus.valid;
+        _resolvedCityId = city.id;
+      } else {
+        _checkStatus = _CheckStatus.invalid;
+        _resolvedCityId = null;
+        // One line in the sheet: the reopen time goes on the same line.
+        _checkMessage = stopMessage.replaceAll('\n', ' ');
+      }
     });
   }
 
-  Future<void> _saveLocation() async {
-    if (_isSaving ||
-        _checkStatus != _CheckStatus.valid ||
-        _resolvedCity == null) {
-      return;
-    }
-    setState(() => _isSaving = true);
+  // Kept as a field for the bottom sheet's spinner state.
+  final bool _isSaving = false;
 
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        await FirebaseFirestore.instance.collection('users').doc(user.uid).set(
-          {
-            'address': {
-              'lat': _center.latitude,
-              'lng': _center.longitude,
-              'city': _resolvedCity,
-              'geohash': Geohash.encode(_center.latitude, _center.longitude),
-            },
-          },
-          SetOptions(merge: true),
-        );
-      }
-
-      if (mounted) {
-        Navigator.of(context).pop({
-          'lat': _center.latitude,
-          'lng': _center.longitude,
-          'city': _resolvedCity,
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        ConnectionDialog.show(
-          context,
-          language: widget.language,
-          message: TranslationHelper.get(
-              isConnectivityError(e) ? 'no_internet' : 'error'),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSaving = false);
-    }
+  void _saveLocation() {
+    if (_checkStatus != _CheckStatus.valid || _resolvedCityId == null) return;
+    Navigator.of(context).pop({
+      'lat': _center.latitude,
+      'lng': _center.longitude,
+      'city_id': _resolvedCityId,
+    });
   }
 
   /// Custom teardrop pin (matches the design reference) instead of a stock
@@ -530,7 +449,6 @@ class _SelectMapPageState extends State<SelectMapPage> {
                         target: _center,
                         zoom: 15,
                       ),
-                      onMapCreated: (controller) => _mapController = controller,
                       style: _mapStyle,
                       onCameraMove: (position) => _center = position.target,
                       onCameraIdle: _checkCurrentLocation,
